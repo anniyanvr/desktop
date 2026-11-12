@@ -4,7 +4,7 @@ Thank you for your interest in contributing! Please see the guidelines below bef
 You can also visit our [developer guide](https://developers.mattermost.com/contribute/desktop/) to learn more information about how to set up your environment, as well as develop and test changes to the Desktop App.
 
 ## Issue
-We really appreciate your feedback on the Desktop App. We'd ask that before you file an issue that you go through a few steps beforehand.
+We really appreciate your feedback on the Desktop App. We ask that you go through a few steps before filing an issue.
 
 ### Does it reproduce in a web browser?
 Mattermost Desktop is based on Electron, which integrates the Chrome engine within a standalone application.
@@ -30,7 +30,7 @@ If you have an idea for a new feature, we'd love to hear about it!
 Please let us know in the Mattermost Community server by making a post in the [Feature Proposals](https://community-daily.mattermost.com/core/channels/feature-ideas) channel.
 
 ## Pull request
-If you are interested on working on an issue, we would very much appreciate your help!
+If you are interested in working on an issue, we would very much appreciate your help!
 
 We have a list of issues marked as [Help Wanted](https://mattermost.com/pl/help-wanted-desktop) that are available to be worked on.  
 If you'd like to take on an issue, simply comment on the issue and one of the Core Contributors will assign it to you.
@@ -43,4 +43,4 @@ npm run check-types
 npm run test
 ```
 2. If you are fixing a bug, consider writing a unit test for the change so that the issue does not resurface. If you are adding a new feature, consider additionally writing end-to-end (E2E) tests to thoroughly test the changes.
-3. Please complete the [Mattermost CLA](http://www.mattermost.org/mattermost-contributor-agreement/) prior to submitting a PR.
+3. Please complete the [Mattermost CLA](https://mattermost.com/contribute/) prior to submitting a PR.

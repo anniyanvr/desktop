@@ -3,10 +3,11 @@
 'use strict';
 
 import {spawn} from 'child_process';
-
 import path from 'path';
 
 import {app, dialog} from 'electron';
+
+import sentryHandler from 'main/sentryHandler';
 
 import {CriticalErrorHandler} from './CriticalErrorHandler';
 
@@ -28,10 +29,6 @@ jest.mock('electron', () => ({
     },
 }));
 
-jest.mock('electron-log', () => ({
-    error: jest.fn(),
-}));
-
 jest.mock('fs', () => ({
     writeFileSync: jest.fn(),
 }));
@@ -40,32 +37,26 @@ jest.mock('child_process', () => ({
     spawn: jest.fn(),
 }));
 
+jest.mock('main/i18nManager', () => ({
+    localizeMessage: jest.fn(),
+}));
+
+jest.mock('main/sentryHandler', () => ({
+    flush: jest.fn(),
+}));
+
 describe('main/CriticalErrorHandler', () => {
     const criticalErrorHandler = new CriticalErrorHandler();
-    beforeEach(() => {
-        criticalErrorHandler.setMainWindow({});
-    });
-
-    describe('windowUnresponsiveHandler', () => {
-        it('should do nothing when mainWindow is null', () => {
-            criticalErrorHandler.setMainWindow(null);
-            criticalErrorHandler.windowUnresponsiveHandler();
-            expect(dialog.showMessageBox).not.toBeCalled();
-        });
-
-        it('should call app.relaunch when user elects not to wait', async () => {
-            const promise = Promise.resolve({response: 0});
-            dialog.showMessageBox.mockImplementation(() => promise);
-            criticalErrorHandler.windowUnresponsiveHandler();
-            await promise;
-            expect(app.relaunch).toBeCalled();
-        });
-    });
+    const env = process.env;
 
     describe('processUncaughtExceptionHandler', () => {
         beforeEach(() => {
             app.isReady.mockImplementation(() => true);
-            criticalErrorHandler.setMainWindow({isVisible: true});
+            process.env = {...env, NODE_ENV: 'jest'};
+        });
+
+        afterAll(() => {
+            process.env = env;
         });
 
         it('should throw error if app is not ready', () => {
@@ -73,16 +64,6 @@ describe('main/CriticalErrorHandler', () => {
             expect(() => {
                 criticalErrorHandler.processUncaughtExceptionHandler(new Error('test'));
             }).toThrow(Error);
-            expect(dialog.showMessageBox).not.toBeCalled();
-        });
-
-        it('should do nothing if main window is null or not visible', () => {
-            criticalErrorHandler.setMainWindow(null);
-            criticalErrorHandler.processUncaughtExceptionHandler(new Error('test'));
-            expect(dialog.showMessageBox).not.toBeCalled();
-
-            criticalErrorHandler.setMainWindow({isVisible: false});
-            criticalErrorHandler.processUncaughtExceptionHandler(new Error('test'));
             expect(dialog.showMessageBox).not.toBeCalled();
         });
 
@@ -102,6 +83,24 @@ describe('main/CriticalErrorHandler', () => {
             criticalErrorHandler.processUncaughtExceptionHandler(new Error('test'));
             await promise;
             expect(app.relaunch).toBeCalled();
+        });
+
+        it('should call sentryHandler.flush before app.exit when an exception happens', async () => {
+            const callOrder = [];
+            sentryHandler.flush.mockImplementation(() => {
+                callOrder.push('flush');
+                return Promise.resolve();
+            });
+            app.exit.mockImplementation(() => {
+                callOrder.push('exit');
+            });
+            path.join.mockImplementation(() => 'testfile.txt');
+            const promise = Promise.resolve({response: process.platform === 'darwin' ? 0 : 2});
+            dialog.showMessageBox.mockImplementation(() => promise);
+            criticalErrorHandler.processUncaughtExceptionHandler(new Error('test'));
+            await promise;
+            await new Promise((resolve) => setImmediate(resolve));
+            expect(callOrder).toEqual(['flush', 'exit']);
         });
     });
 });

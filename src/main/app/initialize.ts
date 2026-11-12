@@ -2,101 +2,117 @@
 // See LICENSE.txt for license information.
 
 import path from 'path';
+import {pathToFileURL} from 'url';
 
-import {app, ipcMain, session} from 'electron';
-import installExtension, {REACT_DEVELOPER_TOOLS} from 'electron-devtools-installer';
+import type {IpcMainInvokeEvent} from 'electron';
+import {app, BrowserWindow, ipcMain, nativeTheme, net, protocol, session} from 'electron';
+import installExtension, {REACT_DEVELOPER_TOOLS, REDUX_DEVTOOLS} from 'electron-devtools-installer';
 import isDev from 'electron-is-dev';
-import log from 'electron-log';
+import Joi from 'joi';
 
+import MainWindow from 'app/mainWindow/mainWindow';
+import MenuManager from 'app/menus';
+import NavigationManager from 'app/navigationManager';
+import {setupBadge} from 'app/system/badge';
+import Tray from 'app/system/tray/tray';
+import WebContentsManager from 'app/views/webContentsManager';
 import {
-    SWITCH_SERVER,
-    FOCUS_BROWSERVIEW,
     QUIT,
-    DOUBLE_CLICK_ON_WINDOW,
-    SHOW_NEW_SERVER_MODAL,
-    WINDOW_CLOSE,
-    WINDOW_MAXIMIZE,
-    WINDOW_MINIMIZE,
-    WINDOW_RESTORE,
     NOTIFY_MENTION,
-    GET_DOWNLOAD_LOCATION,
-    SHOW_SETTINGS_WINDOW,
-    RELOAD_CONFIGURATION,
-    SWITCH_TAB,
-    CLOSE_TAB,
-    OPEN_TAB,
-    SHOW_EDIT_SERVER_MODAL,
-    SHOW_REMOVE_SERVER_MODAL,
-    UPDATE_SHORTCUT_MENU,
-    UPDATE_LAST_ACTIVE,
     GET_AVAILABLE_SPELL_CHECKER_LANGUAGES,
     USER_ACTIVITY_UPDATE,
+    PING_DOMAIN,
+    OPEN_APP_MENU,
+    GET_CONFIGURATION,
+    GET_LOCAL_CONFIGURATION,
+    UPDATE_CONFIGURATION,
+    UPDATE_PATHS,
+    GET_DARK_MODE,
+    DOUBLE_CLICK_ON_WINDOW,
+    TOGGLE_SECURE_INPUT,
+    GET_APP_INFO,
+    DEVELOPER_MODE_UPDATED,
+    SERVER_ADDED,
+    GET_FULL_SCREEN_STATUS,
+    SERVER_PRE_AUTH_SECRET_CHANGED,
+    SERVER_URL_CHANGED,
 } from 'common/communication';
 import Config from 'common/config';
-import urlUtils from 'common/utils/url';
-
-import AllowProtocolDialog from 'main/allowProtocolDialog';
+import {MATTERMOST_PROTOCOL} from 'common/constants';
+import {Logger} from 'common/log';
+import ServerManager from 'common/servers/serverManager';
+import {parseURL} from 'common/utils/url';
+import {ipcValidate} from 'common/Validator';
 import AppVersionManager from 'main/AppVersionManager';
-import AuthManager from 'main/authManager';
 import AutoLauncher from 'main/AutoLauncher';
-import {setupBadge} from 'main/badge';
-import CertificateManager from 'main/certificateManager';
-import {updatePaths} from 'main/constants';
+import {configPath, updatePaths} from 'main/constants';
 import CriticalErrorHandler from 'main/CriticalErrorHandler';
-import {displayDownloadCompleted} from 'main/notifications';
+import DeveloperMode from 'main/developerMode';
+import downloadsManager from 'main/downloadsManager';
+import {maybeRegisterE2eHooks} from 'main/e2e/register';
+import i18nManager from 'main/i18nManager';
+import NonceManager from 'main/nonceManager';
+import {getDoNotDisturb} from 'main/notifications';
 import parseArgs from 'main/ParseArgs';
-import TrustedOriginsStore from 'main/trustedOrigins';
-import {refreshTrayImages, setupTray} from 'main/tray/tray';
+import PerformanceMonitor from 'main/performanceMonitor';
+import secureStorage from 'main/secureStorage';
+import AllowProtocolDialog from 'main/security/allowProtocolDialog';
+import LocalNetworkAccessManager from 'main/security/localNetworkAccess';
+import PermissionsManager from 'main/security/permissionsManager';
+import PreAuthManager from 'main/security/preAuthManager';
+import sentryHandler from 'main/sentryHandler';
+import SessionAttributesManager from 'main/sessionAttributes/sessionAttributesManager';
+import updateNotifier from 'main/updateNotifier';
 import UserActivityMonitor from 'main/UserActivityMonitor';
-import WindowManager from 'main/windows/windowManager';
-
-import {protocols} from '../../../electron-builder.json';
 
 import {
+    handleAppActivate,
     handleAppBeforeQuit,
     handleAppBrowserWindowCreated,
     handleAppCertificateError,
-    handleAppGPUProcessCrashed,
     handleAppSecondInstance,
     handleAppWillFinishLaunching,
     handleAppWindowAllClosed,
+    handleChildProcessGone,
 } from './app';
-import {handleConfigUpdate, handleDarkModeChange} from './config';
 import {
-    addNewServerModalWhenMainWindowIsShown,
+    handleConfigUpdate,
+    handleDarkModeChange,
+    handleDeveloperModeUpdated,
+    handleGetConfiguration,
+    handleGetLocalConfiguration,
+    handleUpdateTheme,
+    updateConfiguration,
+} from './config';
+import {
+    handleMainWindowIsShown,
     handleAppVersion,
-    handleCloseTab,
-    handleEditServerModal,
     handleMentionNotification,
-    handleNewServerModal,
     handleOpenAppMenu,
-    handleOpenTab,
     handleQuit,
-    handleReloadConfig,
-    handleRemoveServerModal,
-    handleSelectDownload,
-    handleSwitchServer,
-    handleSwitchTab,
-    handleUpdateLastActive,
+    handlePingDomain,
+    handleToggleSecureInput,
 } from './intercom';
 import {
     clearAppCache,
     getDeeplinkingURL,
-    handleUpdateMenuEvent,
     shouldShowTrayIcon,
-    updateServerInfos,
     updateSpellCheckerLocales,
     wasUpdated,
-    initCookieManager,
+    updateServerInfos,
 } from './utils';
+import {
+    handleDoubleClick,
+    handleGetDarkMode,
+} from './windows';
 
-export const mainProtocol = protocols?.[0]?.schemes?.[0];
+const log = new Logger('App.Initialize');
 
 /**
  * Main entry point for the application, ensures that everything initializes in the proper order
  */
 export async function initialize() {
-    process.on('uncaughtException', CriticalErrorHandler.processUncaughtExceptionHandler.bind(CriticalErrorHandler));
+    CriticalErrorHandler.init();
     global.willAppQuit = false;
 
     // initialization that can run before the app is ready
@@ -117,7 +133,7 @@ export async function initialize() {
 
     // initialization that should run once the app is ready
     initializeInterCommunicationEventListeners();
-    initializeAfterAppReady();
+    await initializeAfterAppReady();
 }
 
 //
@@ -126,12 +142,6 @@ export async function initialize() {
 
 function initializeArgs() {
     global.args = parseArgs(process.argv.slice(1));
-
-    // output the application version via cli when requested (-v or --version)
-    if (global.args.version) {
-        process.stdout.write(`v.${app.getVersion()}\n`);
-        process.exit(0); // eslint-disable-line no-process-exit
-    }
 
     global.isDev = isDev && !global.args.disableDevMode; // this doesn't seem to be right and isn't used as the single source of truth
 
@@ -152,13 +162,26 @@ async function initializeConfig() {
             handleConfigUpdate(configData);
 
             // can only call this before the app is ready
-            if (Config.enableHardwareAcceleration === false) {
+            // eslint-disable-next-line no-undef
+            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+            // @ts-ignore
+            if (Config.enableHardwareAcceleration === false || __DISABLE_GPU__) {
                 app.disableHardwareAcceleration();
             }
 
+            sentryHandler.init();
+
             resolve();
         });
-        Config.init();
+        Config.init(configPath, app.name);
+        ipcMain.on(UPDATE_PATHS, () => {
+            log.debug('Config.UPDATE_PATHS');
+
+            Config.setConfigPath(configPath);
+            if (Config.data) {
+                Config.reload();
+            }
+        });
     });
 }
 
@@ -166,12 +189,10 @@ function initializeAppEventListeners() {
     app.on('second-instance', handleAppSecondInstance);
     app.on('window-all-closed', handleAppWindowAllClosed);
     app.on('browser-window-created', handleAppBrowserWindowCreated);
-    app.on('activate', () => WindowManager.showMainWindow());
+    app.on('activate', handleAppActivate);
     app.on('before-quit', handleAppBeforeQuit);
     app.on('certificate-error', handleAppCertificateError);
-    app.on('select-client-certificate', CertificateManager.handleSelectCertificate);
-    app.on('gpu-process-crashed', handleAppGPUProcessCrashed);
-    app.on('login', AuthManager.handleAppLogin);
+    app.on('child-process-gone', handleChildProcessGone);
     app.on('will-finish-launching', handleAppWillFinishLaunching);
 }
 
@@ -180,10 +201,10 @@ function initializeBeforeAppReady() {
         log.error('No config loaded');
         return;
     }
+
     if (process.env.NODE_ENV !== 'test') {
         app.enableSandbox();
     }
-    TrustedOriginsStore.load();
 
     // prevent using a different working directory, which happens on windows running after installation.
     const expectedPath = path.dirname(process.execPath);
@@ -192,66 +213,194 @@ function initializeBeforeAppReady() {
         process.chdir(expectedPath);
     }
 
-    refreshTrayImages(Config.trayIconTheme);
+    Tray.refreshImages(Config.trayIconTheme);
 
+    // E2E tests intentionally launch multiple Electron instances in parallel.
+    // Skip the single-instance lock in test mode so secondary workers do not exit during startup.
     // If there is already an instance, quit this one
-    const gotTheLock = app.requestSingleInstanceLock();
-    if (!gotTheLock) {
-        app.exit();
-        global.willAppQuit = true;
+    // eslint-disable-next-line no-undef
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
+    if (!__IS_MAC_APP_STORE__ && (process.env.NODE_ENV !== 'test' || process.env.MM_E2E_USE_SINGLE_INSTANCE_LOCK === 'true')) {
+        const gotTheLock = app.requestSingleInstanceLock();
+        if (!gotTheLock) {
+            app.exit();
+            global.willAppQuit = true;
+        }
     }
 
     AllowProtocolDialog.init();
 
     if (isDev && process.env.NODE_ENV !== 'test') {
-        log.info('In development mode, deeplinking is disabled');
-    } else if (mainProtocol) {
-        app.setAsDefaultProtocolClient(mainProtocol);
+        app.setAsDefaultProtocolClient('mattermost-dev', process.execPath, [path.resolve(process.cwd(), 'dist/')]);
+    } else {
+        app.setAsDefaultProtocolClient(MATTERMOST_PROTOCOL);
     }
+
+    if (process.platform === 'darwin' || process.platform === 'win32') {
+        nativeTheme.on('updated', handleUpdateTheme);
+    }
+
+    protocol.registerSchemesAsPrivileged([
+        {scheme: 'mattermost-desktop', privileges: {standard: true}},
+    ]);
 }
 
 function initializeInterCommunicationEventListeners() {
-    ipcMain.on(RELOAD_CONFIGURATION, handleReloadConfig);
-    ipcMain.on(NOTIFY_MENTION, handleMentionNotification);
-    ipcMain.handle('get-app-version', handleAppVersion);
-    ipcMain.on(UPDATE_SHORTCUT_MENU, handleUpdateMenuEvent);
-    ipcMain.on(FOCUS_BROWSERVIEW, WindowManager.focusBrowserView);
-    ipcMain.on(UPDATE_LAST_ACTIVE, handleUpdateLastActive);
+    ipcMain.handle(NOTIFY_MENTION, ipcValidate(handleMentionNotification, [
+        Joi.string().allow('').required(),
+        Joi.string().allow('').required(),
+        Joi.string().allow('').required(),
+        Joi.string().allow('').required(),
+        Joi.string().allow('').required(),
+        Joi.boolean().required(),
+        Joi.string().allow('').required(),
+    ]));
+    ipcMain.handle(GET_APP_INFO, handleAppVersion);
 
     if (process.platform !== 'darwin') {
-        ipcMain.on('open-app-menu', handleOpenAppMenu);
+        ipcMain.on(OPEN_APP_MENU, ipcValidate(handleOpenAppMenu, [Joi.number().integer().min(0).required()]));
     }
-
-    ipcMain.on(SWITCH_SERVER, handleSwitchServer);
-    ipcMain.on(SWITCH_TAB, handleSwitchTab);
-    ipcMain.on(CLOSE_TAB, handleCloseTab);
-    ipcMain.on(OPEN_TAB, handleOpenTab);
 
     ipcMain.on(QUIT, handleQuit);
 
-    ipcMain.on(DOUBLE_CLICK_ON_WINDOW, WindowManager.handleDoubleClick);
-
-    ipcMain.on(SHOW_NEW_SERVER_MODAL, handleNewServerModal);
-    ipcMain.on(SHOW_EDIT_SERVER_MODAL, handleEditServerModal);
-    ipcMain.on(SHOW_REMOVE_SERVER_MODAL, handleRemoveServerModal);
-    ipcMain.on(WINDOW_CLOSE, WindowManager.close);
-    ipcMain.on(WINDOW_MAXIMIZE, WindowManager.maximize);
-    ipcMain.on(WINDOW_MINIMIZE, WindowManager.minimize);
-    ipcMain.on(WINDOW_RESTORE, WindowManager.restore);
-    ipcMain.on(SHOW_SETTINGS_WINDOW, WindowManager.showSettingsWindow);
     ipcMain.handle(GET_AVAILABLE_SPELL_CHECKER_LANGUAGES, () => session.defaultSession.availableSpellCheckerLanguages);
-    ipcMain.handle(GET_DOWNLOAD_LOCATION, handleSelectDownload);
+    ipcMain.handle(PING_DOMAIN, handlePingDomain);
+    ipcMain.handle(GET_CONFIGURATION, handleGetConfiguration);
+    ipcMain.handle(GET_LOCAL_CONFIGURATION, handleGetLocalConfiguration);
+    ipcMain.on(UPDATE_CONFIGURATION, updateConfiguration);
+
+    ipcMain.handle(GET_DARK_MODE, handleGetDarkMode);
+    ipcMain.on(DOUBLE_CLICK_ON_WINDOW, handleDoubleClick);
+    DeveloperMode.on(DEVELOPER_MODE_UPDATED, handleDeveloperModeUpdated);
+
+    ipcMain.on(TOGGLE_SECURE_INPUT, handleToggleSecureInput);
+
+    ipcMain.handle(GET_FULL_SCREEN_STATUS, (event: IpcMainInvokeEvent) => {
+        return BrowserWindow.fromWebContents(event.sender)?.isFullScreen();
+    });
 }
 
-function initializeAfterAppReady() {
-    updateServerInfos(Config.teams);
+async function initializeAfterAppReady() {
+    maybeRegisterE2eHooks();
+
+    // Block all NTLM/Negotiate requests by default
+    session.defaultSession.allowNTLMCredentialsForDomains('');
+
+    protocol.handle('mattermost-desktop', (request: Request) => {
+        const url = parseURL(request.url);
+        if (!url) {
+            return new Response('bad', {status: 400});
+        }
+
+        // Including this snippet from the handler docs to check for path traversal
+        // https://www.electronjs.org/docs/latest/api/protocol#protocolhandlescheme-handler
+        const pathToServe = path.join(app.getAppPath(), 'renderer', url.pathname);
+        const relativePath = path.relative(app.getAppPath(), pathToServe);
+        const isSafe = relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
+        if (!isSafe) {
+            return new Response('bad', {status: 400});
+        }
+
+        return net.fetch(pathToFileURL(pathToServe).toString());
+    });
+
+    // Initialize secure storage after app is ready
+    try {
+        await secureStorage.init();
+    } catch (error) {
+        log.warn('Failed to initialize secure storage cache:', {error});
+    }
+
+    if (process.platform === 'darwin' || process.platform === 'win32') {
+        handleUpdateTheme();
+    }
+
+    MainWindow.show();
+
+    const updateServerInfo = (serverId: string) => {
+        if (serverId) {
+            updateServerInfos([ServerManager.getServer(serverId)!]);
+        }
+    };
+    ServerManager.on(SERVER_ADDED, updateServerInfo);
+    ServerManager.on(SERVER_URL_CHANGED, updateServerInfo);
+    ServerManager.on(SERVER_PRE_AUTH_SECRET_CHANGED, updateServerInfo);
+
+    ServerManager.on(SERVER_ADDED, PreAuthManager.loadPreAuthSecretForServer);
+    ServerManager.init();
+    ServerManager.off(SERVER_ADDED, PreAuthManager.loadPreAuthSecretForServer);
+
     app.setAppUserModelId('Mattermost.Desktop'); // Use explicit AppUserModelID
     const defaultSession = session.defaultSession;
+    defaultSession.webRequest.onBeforeRequest(async (details, callback) => {
+        try {
+            const shouldCancel = await LocalNetworkAccessManager.shouldCancelLocalNetworkRequest(details);
+
+            if (shouldCancel) {
+                log.warn('Blocked server content from accessing local or private network URL', {
+                    resourceType: details.resourceType,
+                    origin: parseURL(details.url)?.origin,
+                    webContentsId: details.webContentsId,
+                });
+                callback({cancel: true});
+                return;
+            }
+        } catch (error) {
+            log.warn('Error while checking local network request policy', {error});
+        }
+
+        callback({});
+    });
+
+    defaultSession.webRequest.onHeadersReceived((details, callback) => {
+        const url = parseURL(details.url);
+        if (url?.protocol === 'mattermost-desktop:' && url?.pathname.endsWith('html')) {
+            callback({
+                responseHeaders: {
+                    ...details.responseHeaders,
+                    'Content-Security-Policy': [`default-src 'self'; style-src 'self' 'nonce-${NonceManager.create(details.url)}'; media-src data:; img-src 'self' data:`],
+                },
+            });
+            return;
+        }
+
+        // You can't call the callback more than once, so return if the preAuthManager handled it
+        if (PreAuthManager.preAuthHeaderOnHeadersReceivedHander(details, callback)) {
+            return;
+        }
+
+        downloadsManager.webRequestOnHeadersReceivedHandler(details, callback);
+    });
+
+    // Attach this to the server-validation session to handle pre-auth headers for server validation as well
+    session.fromPartition('server-validation').webRequest.onHeadersReceived((details, callback) => {
+        if (PreAuthManager.preAuthHeaderOnHeadersReceivedHander(details, callback)) {
+            return;
+        }
+
+        callback({});
+    });
+
+    defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
+        try {
+            callback({
+                requestHeaders: {
+                    ...details.requestHeaders,
+                    ...PreAuthManager.injectPreAuthSecret(details),
+                    ...SessionAttributesManager.injectHeader(details),
+                },
+            });
+        } catch (error) {
+            log.debug('Header injector error', {error});
+            callback({requestHeaders: details.requestHeaders});
+        }
+    });
 
     if (process.platform !== 'darwin') {
         defaultSession.on('spellcheck-dictionary-download-failure', (event, lang) => {
             if (Config.spellCheckerURL) {
-                log.error(`There was an error while trying to load the dictionary definitions for ${lang} fromfully the specified url. Please review you have access to the needed files. Url used was ${Config.spellCheckerURL}`);
+                log.error(`There was an error while trying to load the dictionary definitions for ${lang} from fully the specified url. Please review you have access to the needed files. Url used was ${Config.spellCheckerURL}`);
             } else {
                 log.warn(`There was an error while trying to download the dictionary definitions for ${lang}, spellchecking might not work properly.`);
             }
@@ -269,112 +418,112 @@ function initializeAfterAppReady() {
         updateSpellCheckerLocales();
     }
 
-    if (wasUpdated(AppVersionManager.lastAppVersion)) {
-        clearAppCache();
+    if (typeof Config.canUpgrade === 'undefined') {
+        // windows might not be ready, so we have to wait until it is
+        Config.once('update', () => {
+            log.debug('checkForUpdates');
+            if (Config.canUpgrade && Config.autoCheckForUpdates) {
+                setTimeout(() => {
+                    updateNotifier.checkForUpdates(false);
+                }, 5000);
+            } else {
+                log.info(`Autoupgrade disabled: ${Config.canUpgrade}`);
+            }
+        });
+    } else if (Config.canUpgrade && Config.autoCheckForUpdates) {
+        setTimeout(() => {
+            updateNotifier.checkForUpdates(false);
+        }, 5000);
+    } else {
+        log.info(`Autoupgrade disabled: ${Config.canUpgrade}`);
     }
-    AppVersionManager.lastAppVersion = app.getVersion();
 
     if (!global.isDev) {
         AutoLauncher.upgradeAutoLaunch();
     }
 
-    if (global.isDev) {
-        installExtension(REACT_DEVELOPER_TOOLS).
-            then((name) => log.info(`Added Extension:  ${name}`)).
-            catch((err) => log.error('An error occurred: ', err));
+    // eslint-disable-next-line no-undef
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
+    if ((global.isDev || __IS_NIGHTLY_BUILD__) && !DeveloperMode.get('disableDevTools')) {
+        installExtension([REACT_DEVELOPER_TOOLS, REDUX_DEVTOOLS], {
+            loadExtensionOptions: {
+                allowFileAccess: true,
+            },
+        }).
+            then(([react, redux]) => log.info(`Added Extension:  ${react.name}, ${redux.name}`)).
+            catch((err) => log.error('An error occurred: ', {err}));
     }
 
     let deeplinkingURL;
 
-    // Protocol handler for win32
-    if (process.platform === 'win32') {
+    NavigationManager.init();
+
+    // Protocol handler for win32 and linux
+    if (process.platform !== 'darwin') {
         const args = process.argv.slice(1);
         if (Array.isArray(args) && args.length > 0) {
             deeplinkingURL = getDeeplinkingURL(args);
+            if (deeplinkingURL) {
+                NavigationManager.openLinkInPrimaryTab(deeplinkingURL);
+            }
         }
     }
 
-    initCookieManager(defaultSession);
+    // Call this to initiate a permissions check for DND state
+    getDoNotDisturb();
 
-    WindowManager.showMainWindow(deeplinkingURL);
+    DeveloperMode.switchOff('disableUserActivityMonitor', () => {
+        // listen for status updates and pass on to renderer
+        UserActivityMonitor.on('status', onUserActivityStatus);
 
-    CriticalErrorHandler.setMainWindow(WindowManager.getMainWindow()!);
-
-    // listen for status updates and pass on to renderer
-    UserActivityMonitor.on('status', (status) => {
-        WindowManager.sendToMattermostViews(USER_ACTIVITY_UPDATE, status);
+        // start monitoring user activity (needs to be started after the app is ready)
+        UserActivityMonitor.startMonitoring();
+    }, () => {
+        UserActivityMonitor.off('status', onUserActivityStatus);
+        UserActivityMonitor.stopMonitoring();
     });
 
-    // start monitoring user activity (needs to be started after the app is ready)
-    UserActivityMonitor.startMonitoring();
-
     if (shouldShowTrayIcon()) {
-        setupTray(Config.trayIconTheme);
+        Tray.init(Config.trayIconTheme);
     }
     setupBadge();
 
-    defaultSession.on('will-download', (event, item, webContents) => {
-        const filename = item.getFilename();
-        const fileElements = filename.split('.');
-        const filters = [];
-        if (fileElements.length > 1) {
-            filters.push({
-                name: 'All files',
-                extensions: ['*'],
-            });
-        }
-        item.setSaveDialogOptions({
-            title: filename,
-            defaultPath: path.resolve(Config.downloadLocation, filename),
-            filters,
-        });
+    defaultSession.on('will-download', downloadsManager.handleNewDownload);
 
-        item.on('done', (doneEvent, state) => {
-            if (state === 'completed') {
-                displayDownloadCompleted(filename, item.savePath, WindowManager.getServerNameByWebContentsId(webContents.id) || '');
-            }
-        });
-    });
+    // needs to be done after app ready
+    // must be done before update menu
+    if (Config.appLanguage) {
+        i18nManager.setLocale(Config.appLanguage);
+    } else if (!i18nManager.setLocale(app.getLocale())) {
+        i18nManager.setLocale(app.getLocaleCountryCode());
+    }
 
-    handleUpdateMenuEvent();
+    MenuManager.refreshMenu();
 
     ipcMain.emit('update-dict');
 
-    // supported permission types
-    const supportedPermissionTypes = [
-        'media',
-        'geolocation',
-        'notifications',
-        'fullscreen',
-        'openExternal',
-    ];
-
     // handle permission requests
     // - approve if a supported permission type and the request comes from the renderer or one of the defined servers
-    defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    // is the requested permission type supported?
-        if (!supportedPermissionTypes.includes(permission)) {
-            callback(false);
-            return;
-        }
+    defaultSession.setPermissionRequestHandler(PermissionsManager.handlePermissionRequest);
 
-        // is the request coming from the renderer?
-        const mainWindow = WindowManager.getMainWindow();
-        if (mainWindow && webContents.id === mainWindow.webContents.id) {
-            callback(true);
-            return;
-        }
-
-        const requestingURL = webContents.getURL();
-
-        // is the requesting url trusted?
-        callback(urlUtils.isTrustedURL(requestingURL, Config.teams));
-    });
-
-    // only check for non-Windows, as with Windows we have to wait for GPO teams
-    if (process.platform !== 'win32' || typeof Config.registryConfigData !== 'undefined') {
-        if (Config.teams.length === 0) {
-            addNewServerModalWhenMainWindowIsShown();
-        }
+    if (wasUpdated(AppVersionManager.lastAppVersion)) {
+        clearAppCache();
     }
+    AppVersionManager.lastAppVersion = app.getVersion();
+
+    handleMainWindowIsShown();
+
+    // The metrics won't start collecting for another minute
+    // so we can assume if we start now everything should be loaded by the time we're done
+    PerformanceMonitor.init();
+}
+
+function onUserActivityStatus(status: {
+    userIsActive: boolean;
+    idleTime: number;
+    isSystemEvent: boolean;
+}) {
+    log.debug('UserActivityMonitor.on(status)', {status});
+    WebContentsManager.sendToAllViews(USER_ACTIVITY_UPDATE, status.userIsActive, status.idleTime, status.isSystemEvent);
 }

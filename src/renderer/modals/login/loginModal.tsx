@@ -2,167 +2,129 @@
 // See LICENSE.txt for license information.
 // Copyright (c) 2015-2016 Yuya Ochiai
 
-import React from 'react';
-import {Button, Col, FormLabel, Form, FormGroup, FormControl, Modal} from 'react-bootstrap';
+import type {AuthenticationResponseDetails, AuthInfo} from 'electron/renderer';
+import React, {useState, useEffect, useCallback} from 'react';
+import {FormattedMessage, useIntl} from 'react-intl';
 
-import {LoginModalData} from 'types/auth';
-import {ModalMessage} from 'types/modals';
-import {AuthenticationResponseDetails, AuthInfo} from 'electron/renderer';
+import Input, {SIZE} from 'renderer/components/Input';
+import {Modal} from 'renderer/components/Modal';
 
-import urlUtils from 'common/utils/url';
-import {MODAL_INFO} from 'common/communication';
+import type {LoginModalInfo} from 'types/modals';
 
 type Props = {
     onCancel: (request: AuthenticationResponseDetails) => void;
     onLogin: (request: AuthenticationResponseDetails, username: string, password: string) => void;
-    getAuthInfo: () => void;
+    getAuthInfo: () => Promise<LoginModalInfo>;
 };
 
-type State = {
-    username: string;
-    password: string;
-    request?: AuthenticationResponseDetails;
-    authInfo?: AuthInfo;
-};
+export default function LoginModal({onCancel, onLogin, getAuthInfo}: Props) {
+    const intl = useIntl();
 
-export default class LoginModal extends React.PureComponent<Props, State> {
-    constructor(props: Props) {
-        super(props);
-        this.state = {
-            username: '',
-            password: '',
-        };
-    }
+    const [username, setUsername] = useState('');
+    const [password, setPassword] = useState('');
+    const [showPassword, setShowPassword] = useState(false);
+    const [request, setRequest] = useState<AuthenticationResponseDetails | undefined>();
+    const [authInfo, setAuthInfo] = useState<AuthInfo | undefined>();
 
-    componentDidMount() {
-        window.addEventListener('message', this.handleAuthInfoMessage);
+    const getAuthInfoData = useCallback(async () => {
+        const {request: authRequest, authInfo: authInfoData} = await getAuthInfo();
+        setRequest(authRequest);
+        setAuthInfo(authInfoData);
+    }, [getAuthInfo]);
 
-        this.props.getAuthInfo();
-    }
+    useEffect(() => {
+        getAuthInfoData();
+    }, []);
 
-    componentWillUnmount() {
-        window.removeEventListener('message', this.handleAuthInfoMessage);
-    }
-
-    handleAuthInfoMessage = (event: {data: ModalMessage<LoginModalData>}) => {
-        switch (event.data.type) {
-        case MODAL_INFO: {
-            const {request, authInfo} = event.data.data;
-            this.setState({request, authInfo});
-            break;
+    const handleSubmit = useCallback(() => {
+        if (request) {
+            onLogin(request, username, password);
         }
-        default:
-            break;
+    }, [onLogin, request, username, password]);
+
+    const handleCancel = useCallback(() => {
+        if (request) {
+            onCancel(request);
         }
+    }, [onCancel, request]);
+
+    const onUsernameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+        setUsername(e.target.value);
+    }, []);
+
+    const onPasswordChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+        setPassword(e.target.value);
+    }, []);
+
+    const handleTogglePassword = useCallback(() => {
+        setShowPassword(!showPassword);
+    }, [showPassword]);
+
+    if (!request) {
+        return null;
     }
 
-    handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
-        this.props.onLogin(this.state.request!, this.state.username, this.state.password);
-        this.setState({
-            username: '',
-            password: '',
-            request: undefined,
-            authInfo: undefined,
-        });
-    }
-
-    handleCancel = (event: React.MouseEvent<HTMLButtonElement>) => {
-        event.preventDefault();
-        this.props.onCancel(this.state.request!);
-        this.setState({
-            username: '',
-            password: '',
-            request: undefined,
-            authInfo: undefined,
-        });
-    }
-
-    setUsername = (e: React.ChangeEvent<HTMLInputElement>) => {
-        this.setState({username: e.target.value});
-    }
-
-    setPassword = (e: React.ChangeEvent<HTMLInputElement>) => {
-        this.setState({password: e.target.value});
-    }
-
-    render() {
-        let theServer = '';
-        if (!(this.state.request && this.state.authInfo)) {
-            theServer = '';
-        } else if (this.state.authInfo.isProxy) {
-            theServer = `The proxy ${this.state.authInfo.host}:${this.state.authInfo.port}`;
-        } else {
-            const tmpURL = urlUtils.parseURL(this.state.request.url);
-            theServer = `The server ${tmpURL?.protocol}//${tmpURL?.host}`;
-        }
-        const message = `${theServer} requires a username and password.`;
-        return (
-            <Modal
-                show={Boolean(this.state.request && this.state.authInfo)}
-            >
-                <Modal.Header>
-                    <Modal.Title>{'Authentication Required'}</Modal.Title>
-                </Modal.Header>
-                <Modal.Body>
-                    <p>
-                        { message }
-                    </p>
-                    <Form
-                        onSubmit={this.handleSubmit}
+    return (
+        <Modal
+            id='preAuthModal'
+            show={Boolean(request && authInfo)}
+            onExited={handleCancel}
+            modalHeaderText={authInfo?.isProxy ? (
+                <FormattedMessage
+                    id='renderer.modals.preAuth.proxyTitle'
+                    defaultMessage='Proxy authentication required'
+                />
+            ) : (
+                <FormattedMessage
+                    id='renderer.modals.preAuth.serverTitle'
+                    defaultMessage='Server authentication required'
+                />
+            )}
+            handleConfirm={handleSubmit}
+            handleEnterKeyPress={handleSubmit}
+            handleCancel={handleCancel}
+            modalSubheaderText={authInfo?.isProxy ? (
+                <FormattedMessage
+                    id='renderer.modals.preAuth.proxyMessage'
+                    defaultMessage='The proxy at {url} requires additional authentication before you can proceed.'
+                    values={{url: request.url}}
+                />
+            ) : (
+                <FormattedMessage
+                    id='renderer.modals.preAuth.serverMessage'
+                    defaultMessage='The server at {url} requires additional authentication before you can proceed.'
+                    values={{url: request.url}}
+                />
+            )}
+        >
+            <Input
+                autoFocus={true}
+                id='loginModalUsername'
+                name='username'
+                type='text'
+                inputSize={SIZE.LARGE}
+                value={username}
+                onChange={onUsernameChange}
+                placeholder={intl.formatMessage({id: 'renderer.modals.login.loginModal.username', defaultMessage: 'User Name'})}
+            />
+            <Input
+                id='loginModalPassword'
+                name='password'
+                type={showPassword ? 'text' : 'password'}
+                inputSize={SIZE.LARGE}
+                onChange={onPasswordChange}
+                value={password}
+                placeholder={intl.formatMessage({id: 'renderer.modals.login.loginModal.password', defaultMessage: 'Password'})}
+                inputSuffix={
+                    <button
+                        type='button'
+                        className='Input__toggle-password'
+                        onClick={handleTogglePassword}
                     >
-                        <FormGroup>
-                            <Col
-                                as={FormLabel}
-                                sm={2}
-                            >{'User Name'}</Col>
-                            <Col sm={10}>
-                                <FormControl
-                                    type='text'
-                                    placeholder='User Name'
-                                    onChange={this.setUsername}
-                                    value={this.state.username}
-                                    onClick={(e: React.MouseEvent<HTMLInputElement>) => {
-                                        e.stopPropagation();
-                                    }}
-                                />
-                            </Col>
-                        </FormGroup>
-                        <FormGroup>
-                            <Col
-                                as={FormLabel}
-                                sm={2}
-                            >{'Password'}</Col>
-                            <Col sm={10}>
-                                <FormControl
-                                    type='password'
-                                    placeholder='Password'
-                                    onChange={this.setPassword}
-                                    value={this.state.password}
-                                    onClick={(e: React.MouseEvent<HTMLInputElement>) => {
-                                        e.stopPropagation();
-                                    }}
-                                />
-                            </Col>
-                        </FormGroup>
-                        <FormGroup>
-                            <Col sm={12}>
-                                <div className='pull-right'>
-                                    <Button
-                                        type='submit'
-                                        variant='primary'
-                                    >{'Login'}</Button>
-                                    { ' ' }
-                                    <Button
-                                        variant='link'
-                                        onClick={this.handleCancel}
-                                    >{'Cancel'}</Button>
-                                </div>
-                            </Col>
-                        </FormGroup>
-                    </Form>
-                </Modal.Body>
-            </Modal>
-        );
-    }
+                        <i className={showPassword ? 'icon icon-eye-off-outline' : 'icon icon-eye-outline'}/>
+                    </button>
+                }
+            />
+        </Modal>
+    );
 }

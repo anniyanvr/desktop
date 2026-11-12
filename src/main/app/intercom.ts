@@ -1,27 +1,27 @@
 // Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {app, dialog, IpcMainEvent, IpcMainInvokeEvent, Menu} from 'electron';
-import log from 'electron-log';
+import type {IpcMainEvent, IpcMainInvokeEvent} from 'electron';
+import {app, BrowserWindow, Menu} from 'electron';
 
-import {Team} from 'types/config';
-import {MentionData} from 'types/notification';
+import MainWindow from 'app/mainWindow/mainWindow';
+import MessageModal from 'app/mainWindow/modals/messageModal';
+import ModalManager from 'app/mainWindow/modals/modalManager';
+import ServerViewState from 'app/serverHub';
+import {APP_MENU_WILL_CLOSE} from 'common/communication';
+import {ModalConstants} from 'common/constants';
+import {Logger} from 'common/log';
+import ServerManager from 'common/servers/serverManager';
+import {ping} from 'common/utils/requests';
+import {isValidURL, parseURL} from 'common/utils/url';
+import NotificationManager from 'main/notifications';
+import {getLocalPreload} from 'main/utils';
 
-import Config from 'common/config';
-import {getDefaultTeamWithTabsFromTeam} from 'common/tabs/TabView';
-
-import {displayMention} from 'main/notifications';
-import {getLocalPreload, getLocalURLString} from 'main/utils';
-import ModalManager from 'main/views/modalManager';
-import WindowManager from 'main/windows/windowManager';
+import type {UniqueServer} from 'types/config';
 
 import {handleAppBeforeQuit} from './app';
-import {updateServerInfos} from './utils';
 
-export function handleReloadConfig() {
-    Config.reload();
-    WindowManager.handleUpdateConfig();
-}
+const log = new Logger('App.Intercom');
 
 export function handleAppVersion() {
     return {
@@ -37,192 +37,166 @@ export function handleQuit(e: IpcMainEvent, reason: string, stack: string) {
     app.quit();
 }
 
-export function handleSwitchServer(event: IpcMainEvent, serverName: string) {
-    WindowManager.switchServer(serverName);
-}
+function handleShowOnboardingScreens(showWelcomeScreen: boolean, showNewServerModal: boolean, mainWindowIsVisible: boolean) {
+    log.debug('handleShowOnboardingScreens', {showWelcomeScreen, showNewServerModal, mainWindowIsVisible});
 
-export function handleSwitchTab(event: IpcMainEvent, serverName: string, tabName: string) {
-    WindowManager.switchTab(serverName, tabName);
-}
-
-export function handleCloseTab(event: IpcMainEvent, serverName: string, tabName: string) {
-    const teams = Config.teams;
-    teams.forEach((team) => {
-        if (team.name === serverName) {
-            team.tabs.forEach((tab) => {
-                if (tab.name === tabName) {
-                    tab.isOpen = false;
-                }
-            });
+    if (showWelcomeScreen) {
+        const welcomeScreen = ModalManager.modalQueue.find((modal) => modal.key === 'welcomeScreen');
+        if (welcomeScreen) {
+            return;
         }
-    });
-    const nextTab = teams.find((team) => team.name === serverName)!.tabs.filter((tab) => tab.isOpen)[0].name;
-    WindowManager.switchTab(serverName, nextTab);
-    Config.set('teams', teams);
-}
 
-export function handleOpenTab(event: IpcMainEvent, serverName: string, tabName: string) {
-    const teams = Config.teams;
-    teams.forEach((team) => {
-        if (team.name === serverName) {
-            team.tabs.forEach((tab) => {
-                if (tab.name === tabName) {
-                    tab.isOpen = true;
-                }
-            });
-        }
-    });
-    WindowManager.switchTab(serverName, tabName);
-    Config.set('teams', teams);
-}
+        handleWelcomeScreenModal();
 
-export function addNewServerModalWhenMainWindowIsShown() {
-    const mainWindow = WindowManager.getMainWindow();
-    if (mainWindow) {
-        if (mainWindow.isVisible()) {
-            handleNewServerModal();
-        } else {
-            mainWindow.once('show', () => {
-                handleNewServerModal();
-            });
-        }
-    }
-}
-
-export function handleNewServerModal() {
-    const html = getLocalURLString('newServer.html');
-
-    const modalPreload = getLocalPreload('modalPreload.js');
-
-    const mainWindow = WindowManager.getMainWindow();
-    if (!mainWindow) {
-        return;
-    }
-    const modalPromise = ModalManager.addModal<unknown, Team>('newServer', html, modalPreload, {}, mainWindow, Config.teams.length === 0);
-    if (modalPromise) {
-        modalPromise.then((data) => {
-            const teams = Config.teams;
-            const order = teams.length;
-            const newTeam = getDefaultTeamWithTabsFromTeam({...data, order});
-            teams.push(newTeam);
-            Config.set('teams', teams);
-            updateServerInfos([newTeam]);
-            WindowManager.switchServer(newTeam.name, true);
-        }).catch((e) => {
-            // e is undefined for user cancellation
-            if (e) {
-                log.error(`there was an error in the new server modal: ${e}`);
-            }
-        });
-    } else {
-        log.warn('There is already a new server modal');
-    }
-}
-
-export function handleEditServerModal(e: IpcMainEvent, name: string) {
-    const html = getLocalURLString('editServer.html');
-
-    const modalPreload = getLocalPreload('modalPreload.js');
-
-    const mainWindow = WindowManager.getMainWindow();
-    if (!mainWindow) {
-        return;
-    }
-    const serverIndex = Config.teams.findIndex((team) => team.name === name);
-    if (serverIndex < 0) {
-        return;
-    }
-    const modalPromise = ModalManager.addModal<Team, Team>('editServer', html, modalPreload, Config.teams[serverIndex], mainWindow);
-    if (modalPromise) {
-        modalPromise.then((data) => {
-            const teams = Config.teams;
-            teams[serverIndex].name = data.name;
-            teams[serverIndex].url = data.url;
-            Config.set('teams', teams);
-        }).catch((e) => {
-            // e is undefined for user cancellation
-            if (e) {
-                log.error(`there was an error in the edit server modal: ${e}`);
-            }
-        });
-    } else {
-        log.warn('There is already an edit server modal');
-    }
-}
-
-export function handleRemoveServerModal(e: IpcMainEvent, name: string) {
-    const html = getLocalURLString('removeServer.html');
-
-    const modalPreload = getLocalPreload('modalPreload.js');
-
-    const mainWindow = WindowManager.getMainWindow();
-    if (!mainWindow) {
-        return;
-    }
-    const modalPromise = ModalManager.addModal<string, boolean>('removeServer', html, modalPreload, name, mainWindow);
-    if (modalPromise) {
-        modalPromise.then((remove) => {
-            if (remove) {
-                const teams = Config.teams;
-                const removedTeam = teams.findIndex((team) => team.name === name);
-                if (removedTeam < 0) {
-                    return;
-                }
-                const removedOrder = teams[removedTeam].order;
-                teams.splice(removedTeam, 1);
-                teams.forEach((value) => {
-                    if (value.order > removedOrder) {
-                        value.order--;
-                    }
+        if (process.env.NODE_ENV === 'test') {
+            const welcomeScreenTest = ModalManager.modalQueue.find((modal) => modal.key === 'welcomeScreen');
+            if (welcomeScreenTest?.view.webContents.isLoading()) {
+                welcomeScreenTest?.view.webContents.once('did-finish-load', () => {
+                    app.emit('e2e-app-loaded');
                 });
-                Config.set('teams', teams);
+            } else {
+                app.emit('e2e-app-loaded');
             }
-        }).catch((e) => {
-            // e is undefined for user cancellation
-            if (e) {
-                log.error(`there was an error in the edit server modal: ${e}`);
-            }
-        });
-    } else {
-        log.warn('There is already an edit server modal');
+        }
+
+        return;
+    }
+    if (showNewServerModal) {
+        ServerViewState.showNewServerModal();
     }
 }
 
-export function handleMentionNotification(event: IpcMainEvent, title: string, body: string, channel: {id: string}, teamId: string, url: string, silent: boolean, data: MentionData) {
-    displayMention(title, body, channel, teamId, url, silent, event.sender, data);
+export function handleMainWindowIsShown() {
+    // eslint-disable-next-line no-undef
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
+    const showWelcomeScreen = () => !(Boolean(__SKIP_ONBOARDING_SCREENS__) || ServerManager.hasServers());
+    const showNewServerModal = () => !ServerManager.hasServers();
+
+    /**
+     * The 2 lines above need to be functions, otherwise the mainWindow.once() callback from previous
+     * calls of this function will notification re-evaluate the booleans passed to "handleShowOnboardingScreens".
+    */
+
+    const mainWindow = MainWindow.get();
+    log.debug('handleMainWindowIsShown', {showWelcomeScreen, showNewServerModal, mainWindow: Boolean(mainWindow)});
+    if (mainWindow?.isVisible()) {
+        handleShowOnboardingScreens(showWelcomeScreen(), showNewServerModal(), true);
+    } else {
+        mainWindow?.once('show', () => {
+            handleShowOnboardingScreens(showWelcomeScreen(), showNewServerModal(), false);
+        });
+    }
 }
 
-export function handleOpenAppMenu() {
+export function handleWelcomeScreenModal(prefillURL?: string) {
+    log.debug('handleWelcomeScreenModal');
+
+    const html = 'mattermost-desktop://renderer/welcomeScreen.html';
+
+    const preload = getLocalPreload('internalAPI.js');
+
+    const mainWindow = MainWindow.get();
+    if (!mainWindow) {
+        return;
+    }
+    const modalPromise = ModalManager.addModal<{prefillURL?: string}, UniqueServer>(ModalConstants.WELCOME_SCREEN_MODAL, html, preload, {prefillURL}, mainWindow, !ServerManager.hasServers());
+    if (modalPromise) {
+        modalPromise.then(async (data) => {
+            if (!data?.url || !isValidURL(data.url)) {
+                return;
+            }
+
+            let initialLoadURL;
+            if (prefillURL) {
+                const parsedServerURL = parseURL(data.url);
+                if (parsedServerURL) {
+                    initialLoadURL = parseURL(`${parsedServerURL.origin}${prefillURL.substring(prefillURL.indexOf('/'))}`);
+                }
+            }
+
+            ServerManager.addServer(data, initialLoadURL);
+        }).catch((e) => {
+            // e is undefined for user cancellation
+            if (e) {
+                log.error(`there was an error in the welcome screen modal: ${e}`);
+                log.error(e);
+            }
+        });
+    } else {
+        log.warn('There is already a welcome screen modal');
+    }
+}
+
+export function handleMentionNotification(event: IpcMainInvokeEvent, title: string, body: string, channelId: string, teamId: string, url: string, silent: boolean, soundName: string) {
+    log.debug('handleMentionNotification', {silent, soundName});
+    return NotificationManager.displayMention(title, body, channelId, teamId, url, silent, event.sender, soundName);
+}
+
+export function handleOpenAppMenu(event: IpcMainEvent, buttonX: number) {
+    log.debug('handleOpenAppMenu');
+
     const windowMenu = Menu.getApplicationMenu();
     if (!windowMenu) {
         log.error('No application menu found');
         return;
     }
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window) {
+        log.error('window not found');
+        return;
+    }
+    windowMenu.once('menu-will-close', () => {
+        window.focus();
+        window.webContents.send(APP_MENU_WILL_CLOSE);
+    });
     windowMenu.popup({
-        window: WindowManager.getMainWindow(),
-        x: 18,
+        window,
+        x: buttonX + 14,
         y: 18,
     });
 }
 
-export async function handleSelectDownload(event: IpcMainInvokeEvent, startFrom: string) {
-    const message = 'Specify the folder where files will download';
-    const result = await dialog.showOpenDialog({defaultPath: startFrom || Config.downloadLocation,
-        message,
-        properties:
-     ['openDirectory', 'createDirectory', 'dontAddToRecent', 'promptToCreate']});
-    return result.filePaths[0];
-}
-
-export function handleUpdateLastActive(event: IpcMainEvent, serverName: string, viewName: string) {
-    const teams = Config.teams;
-    teams.forEach((team) => {
-        if (team.name === serverName) {
-            const viewOrder = team?.tabs.find((tab) => tab.name === viewName)?.order || 0;
-            team.lastActiveTab = viewOrder;
+export function handlePingDomain(event: IpcMainInvokeEvent, url: string): Promise<string> {
+    return Promise.allSettled([
+        ping(new URL(`https://${url}`)),
+        ping(new URL(`http://${url}`)),
+    ]).then(([https, http]): string => {
+        if (https.status === 'fulfilled') {
+            return 'https';
+        } else if (http.status === 'fulfilled') {
+            return 'http';
         }
+        throw new Error('Could not find server ' + url);
     });
-    Config.set('teams', teams);
-    Config.set('lastActiveTeam', teams.find((team) => team.name === serverName)?.order || 0);
 }
 
+export function handleToggleSecureInput(event: IpcMainEvent, secureInput: boolean) {
+    if (process.platform !== 'darwin') {
+        return;
+    }
+
+    // Don't allow this to turn on if the main window isn't focused
+    if (secureInput && !MainWindow.get()?.isFocused()) {
+        return;
+    }
+
+    // Enforce macOS to restrict processes from reading the keyboard input when in a password field
+    log.debug('handleToggleSecureInput', {secureInput});
+    app.setSecureKeyboardEntryEnabled(secureInput);
+}
+
+export function handleShowSettingsModal() {
+    const mainWindow = MainWindow.get();
+    if (!mainWindow || MessageModal.isCloseConfirmOpen()) {
+        return;
+    }
+
+    ModalManager.addPriorityModal(
+        ModalConstants.SETTINGS_MODAL,
+        'mattermost-desktop://renderer/settings.html',
+        getLocalPreload('internalAPI.js'),
+        null,
+        mainWindow,
+    );
+}

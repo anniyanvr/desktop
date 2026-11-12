@@ -3,37 +3,42 @@
 // See LICENSE.txt for license information.
 
 import React from 'react';
-import {Modal} from 'react-bootstrap';
+import {FormattedMessage, useIntl} from 'react-intl';
 
 import DestructiveConfirmationModal from './DestructiveConfirmModal';
 
 type Props = {
     show: boolean;
-    serverName: string;
     onHide: () => void;
-    onAccept: React.MouseEventHandler<HTMLButtonElement>;
-    onCancel: React.MouseEventHandler<HTMLButtonElement>;
-}
+    onAccept: () => void;
+    onCancel: () => void;
+};
 
-export default function RemoveServerModal(props: Props) {
-    const {serverName, ...rest} = props;
+function RemoveServerModal(props: Props) {
+    const intl = useIntl();
+    const {...rest} = props;
     return (
         <DestructiveConfirmationModal
             {...rest}
-            title='Remove Server'
-            acceptLabel='Remove'
-            cancelLabel='Cancel'
+            id='removeServerModal'
+            title={intl.formatMessage({id: 'renderer.components.removeServerModal.title', defaultMessage: 'Remove Server'})}
+            acceptLabel={intl.formatMessage({id: 'label.remove', defaultMessage: 'Remove'})}
+            cancelLabel={intl.formatMessage({id: 'label.cancel', defaultMessage: 'Cancel'})}
             body={(
-                <Modal.Body>
-                    <p>
-                        {'This will remove the server from your Desktop App but will not delete any of its data' +
-          ' - you can add the server back to the app at any time.'}
-                    </p>
-                    <p>
-                        {'Confirm you wish to remove the '}<strong>{serverName}</strong>{' server?'}
-                    </p>
-                </Modal.Body>
+                <>
+                    <FormattedMessage
+                        id='renderer.components.removeServerModal.body'
+                        defaultMessage='This will remove the server from your Desktop App but will not delete any of its data - you can add the server back at any time.'
+                    />
+                    <br/><br/>
+                    <FormattedMessage
+                        id='renderer.components.removeServerModal.confirm'
+                        defaultMessage='Are you sure you wish to remove the server?'
+                    />
+                </>
             )}
         />
     );
 }
+
+export default RemoveServerModal;

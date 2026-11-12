@@ -5,13 +5,14 @@
 
 import {initialize} from './initialize';
 
-if (process.env.NODE_ENV !== 'production' && module.hot) {
-    module.hot.accept();
-}
+// TODO: Singletons, we need DI :D
+import('app/mainWindow/serverDropdownView');
+import('app/mainWindow/downloadsDropdownMenuView');
+import('app/mainWindow/downloadsDropdownView');
 
 // attempt to initialize the application
 try {
     initialize();
-} catch (error) {
+} catch (error: any) {
     throw new Error(`App initialization failed: ${error.toString()}`);
 }

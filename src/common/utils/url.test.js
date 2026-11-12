@@ -2,97 +2,170 @@
 // See LICENSE.txt for license information.
 'use strict';
 
-import urlUtils, {getFormattedPathName, isUrlType, equalUrlsIgnoringSubpath, equalUrlsWithSubpath} from 'common/utils/url';
-
-jest.mock('common/tabs/TabView', () => ({
-    getServerView: (srv, tab) => {
-        return {
-            name: `${srv.name}_${tab.name}`,
-            url: `${srv.url}${srv.url.toString().endsWith('/') ? '' : '/'}${tab.name.split('-')[1] || ''}`,
-        };
-    },
-}));
+import {MAX_URL_LENGTH} from 'common/constants';
+import {
+    getFormattedPathName,
+    isUrlType,
+    isValidURL,
+    isValidURI,
+    parseURL,
+    isInternalURL,
+    isCallsPopOutURL,
+    isTrustedURL,
+} from 'common/utils/url';
 
 describe('common/utils/url', () => {
+    describe('getFormattedPathName', () => {
+        it('should add trailing slash', () => {
+            const unformattedPathName = '/aAbBbB/cC/DdeR';
+            expect(getFormattedPathName(unformattedPathName)).toBe('/aAbBbB/cC/DdeR/');
+        });
+    });
+    describe('parseURL', () => {
+        it('should return the URL if it is already a URL', () => {
+            const url = new URL('http://mattermost.com');
+            expect(parseURL(url)).toBe(url);
+        });
+
+        it('should return undefined when a bad url is passed', () => {
+            const badURL = 'not-a-real-url-at-all';
+            expect(parseURL(badURL)).toBe(undefined);
+        });
+
+        it('should remove duplicate slashes in a URL when parsing', () => {
+            const urlWithExtraSlashes = 'https://mattermost.com//sub//path//example';
+            const parsedURL = parseURL(urlWithExtraSlashes);
+
+            expect(parsedURL.toString()).toBe('https://mattermost.com/sub/path/example');
+        });
+
+        it('should preserve triple slashes for non-special schemes', () => {
+            const onenoteUrl = 'onenote:///D:/OneNote/Test.one#section';
+            const parsedURL = parseURL(onenoteUrl);
+
+            expect(parsedURL).toBeDefined();
+            expect(parsedURL.protocol).toBe('onenote:');
+            expect(parsedURL.toString()).toBe(onenoteUrl);
+        });
+
+        it('should preserve file:/// URLs', () => {
+            const fileUrl = 'file:///C:/Users/test.txt';
+            const parsedURL = parseURL(fileUrl);
+
+            expect(parsedURL).toBeDefined();
+            expect(parsedURL.protocol).toBe('file:');
+            expect(parsedURL.toString()).toBe(fileUrl);
+        });
+
+        it('should reject URLs with literal null bytes', () => {
+            expect(parseURL('customproto:///path\x00malicious')).toBeUndefined();
+        });
+
+        it('should reject URLs with percent-encoded null bytes', () => {
+            expect(parseURL('customproto:///path%00malicious')).toBeUndefined();
+        });
+
+        it('should reject URLs longer than the maximum allowed length', () => {
+            const oversizedURL = `http://example.com/${'A'.repeat(MAX_URL_LENGTH)}`;
+            expect(parseURL(oversizedURL)).toBeUndefined();
+        });
+
+        it('should accept URLs at exactly the maximum allowed length', () => {
+            const prefix = 'http://example.com/';
+            const padding = 'A'.repeat(MAX_URL_LENGTH - prefix.length);
+            const maxLengthURL = `${prefix}${padding}`;
+            expect(maxLengthURL.length).toBe(MAX_URL_LENGTH);
+            expect(parseURL(maxLengthURL)).toBeDefined();
+        });
+    });
+
     describe('isValidURL', () => {
         it('should be true for a valid web url', () => {
             const testURL = 'https://developers.mattermost.com/';
-            expect(urlUtils.isValidURL(testURL)).toBe(true);
+            expect(isValidURL(testURL)).toBe(true);
         });
         it('should be true for a valid, non-https web url', () => {
             const testURL = 'http://developers.mattermost.com/';
-            expect(urlUtils.isValidURL(testURL)).toBe(true);
+            expect(isValidURL(testURL)).toBe(true);
         });
         it('should be true for an invalid, self-defined, top-level domain', () => {
             const testURL = 'https://www.example.x';
-            expect(urlUtils.isValidURL(testURL)).toBe(true);
+            expect(isValidURL(testURL)).toBe(true);
         });
         it('should be true for a file download url', () => {
             const testURL = 'https://community.mattermost.com/api/v4/files/ka3xbfmb3ffnmgdmww8otkidfw?download=1';
-            expect(urlUtils.isValidURL(testURL)).toBe(true);
+            expect(isValidURL(testURL)).toBe(true);
         });
         it('should be true for a permalink url', () => {
             const testURL = 'https://community.mattermost.com/test-channel/pl/pdqowkij47rmbyk78m5hwc7r6r';
-            expect(urlUtils.isValidURL(testURL)).toBe(true);
+            expect(isValidURL(testURL)).toBe(true);
         });
         it('should be true for a valid, internal domain', () => {
             const testURL = 'https://mattermost.company-internal';
-            expect(urlUtils.isValidURL(testURL)).toBe(true);
+            expect(isValidURL(testURL)).toBe(true);
         });
         it('should be true for a second, valid internal domain', () => {
             const testURL = 'https://serverXY/mattermost';
-            expect(urlUtils.isValidURL(testURL)).toBe(true);
+            expect(isValidURL(testURL)).toBe(true);
         });
         it('should be true for a valid, non-https internal domain', () => {
             const testURL = 'http://mattermost.local';
-            expect(urlUtils.isValidURL(testURL)).toBe(true);
+            expect(isValidURL(testURL)).toBe(true);
         });
         it('should be true for a valid, non-https, ip address with port number', () => {
             const testURL = 'http://localhost:8065';
-            expect(urlUtils.isValidURL(testURL)).toBe(true);
+            expect(isValidURL(testURL)).toBe(true);
+        });
+
+        // Checks the hostname after the url is parsed. A percent-encoded comma or asterisk is decoded first.
+        // A host that is one mark, or has that mark in the middle or at the end, is left out.
+        // A value with no scheme, an empty url, and a url that is only a scheme are left out.
+        // An underscore host, an IPv6 host, a host of letters and dots, and a trailing dot stay accepted.
+        it.each([
+            ['https://a,b.example', false],
+            ['https://a;b.example', false],
+            ['https://a*.example', false],
+            ['https://.example.com', false],
+            ['https://a%2A.example', false],
+            ['https://a%2C.example', false],
+            ['https://a%3B.example', false],
+            ['https://%2Eexample.com', false],
+            ['https://*', false],
+            ['https://,', false],
+            ['https://;', false],
+            ['https://.', false],
+            ['https://example.com,', false],
+            ['https://example.com;', false],
+            ['https://example.com*', false],
+            ['https://ex*ample.com', false],
+            ['https://example.com ', false],
+            ['https://*,*.example', false],
+            ['*,*.example', false],
+            ['a,b.example', false],
+            ['https://', false],
+            ['', false],
+            ['https://a\uFF0Ab.example', false],
+            ['https://a\uFF0Cb.example', false],
+            ['https://a\uFF1Bb.example', false],
+            ['https://\u3002example.com', false],
+            ['https://A,B.EXAMPLE', false],
+            ['https://user:pass@a,b.example', false],
+            ['https://internal_host.example', true],
+            ['https://[2001:db8::1]/', true],
+            ['https://good.example', true],
+            ['https://example.com.', true],
+        ])('should treat %s as a server url: %s', (url, expected) => {
+            expect(isValidURL(url)).toBe(expected);
         });
     });
     describe('isValidURI', () => {
         it('should be true for a deeplink url', () => {
             const testURL = 'mattermost://community-release.mattermost.com/core/channels/developers';
-            expect(urlUtils.isValidURI(testURL)).toBe(true);
+            expect(isValidURI(testURL)).toBe(true);
         });
         it('should be false for a malicious url', () => {
             const testURL = String.raw`mattermost:///" --data-dir "\\deans-mbp\mattermost`;
-            expect(urlUtils.isValidURI(testURL)).toBe(false);
-        });
-    });
-
-    describe('getHost', () => {
-        it('should return the origin of a well formed url', () => {
-            const myurl = 'https://mattermost.com/download';
-            expect(urlUtils.getHost(myurl)).toBe('https://mattermost.com');
-        });
-
-        it('shoud raise an error on malformed urls', () => {
-            const myurl = 'http://example.com:-80/';
-            expect(() => {
-                urlUtils.getHost(myurl);
-            }).toThrow(SyntaxError);
-        });
-    });
-
-    describe('parseURL', () => {
-        it('should return the URL if it is already a URL', () => {
-            const url = new URL('http://mattermost.com');
-            expect(urlUtils.parseURL(url)).toBe(url);
-        });
-
-        it('should return undefined when a bad url is passed', () => {
-            const badURL = 'not-a-real-url-at-all';
-            expect(urlUtils.parseURL(badURL)).toBe(undefined);
-        });
-
-        it('should remove duplicate slashes in a URL when parsing', () => {
-            const urlWithExtraSlashes = 'https://mattermost.com//sub//path//example';
-            const parsedURL = urlUtils.parseURL(urlWithExtraSlashes);
-
-            expect(parsedURL.toString()).toBe('https://mattermost.com/sub/path/example');
+            expect(isValidURI(testURL)).toBe(false);
         });
     });
 
@@ -101,54 +174,104 @@ describe('common/utils/url', () => {
             const baseURL = new URL('http://mattermost.com');
             const externalURL = new URL('http://google.com');
 
-            expect(urlUtils.isInternalURL(externalURL, baseURL)).toBe(false);
+            expect(isInternalURL(externalURL, baseURL)).toBe(false);
         });
 
         it('should return false on different ports', () => {
             const baseURL = new URL('http://mattermost.com:8080');
             const externalURL = new URL('http://mattermost.com:9001');
 
-            expect(urlUtils.isInternalURL(externalURL, baseURL)).toBe(false);
+            expect(isInternalURL(externalURL, baseURL)).toBe(false);
         });
 
         it('should return false on different subpaths', () => {
             const baseURL = new URL('http://mattermost.com/sub/path/');
             const externalURL = new URL('http://mattermost.com/different/sub/path');
 
-            expect(urlUtils.isInternalURL(externalURL, baseURL)).toBe(false);
+            expect(isInternalURL(externalURL, baseURL)).toBe(false);
         });
 
         it('should return true if matching', () => {
             const baseURL = new URL('http://mattermost.com/');
             const externalURL = new URL('http://mattermost.com');
 
-            expect(urlUtils.isInternalURL(externalURL, baseURL)).toBe(true);
+            expect(isInternalURL(externalURL, baseURL)).toBe(true);
         });
 
         it('should return true if matching with subpath', () => {
             const baseURL = new URL('http://mattermost.com/sub/path/');
             const externalURL = new URL('http://mattermost.com/sub/path');
 
-            expect(urlUtils.isInternalURL(externalURL, baseURL)).toBe(true);
+            expect(isInternalURL(externalURL, baseURL)).toBe(true);
         });
 
         it('should return true if subpath of', () => {
             const baseURL = new URL('http://mattermost.com/');
             const externalURL = new URL('http://mattermost.com/sub/path');
 
-            expect(urlUtils.isInternalURL(externalURL, baseURL)).toBe(true);
+            expect(isInternalURL(externalURL, baseURL)).toBe(true);
+        });
+
+        it('same host, different URL scheme, with ignore scheme', () => {
+            const url1 = new URL('http://server-1.com');
+            const url2 = new URL('mattermost://server-1.com');
+            expect(isInternalURL(url1, url2, true)).toBe(true);
+        });
+
+        it('should return false for http target on an https server', () => {
+            const baseURL = new URL('https://mattermost.com/');
+            const externalURL = new URL('http://mattermost.com/plugins/x');
+
+            expect(isInternalURL(externalURL, baseURL)).toBe(false);
+        });
+
+        it('should allow web socket protocol equivalent', () => {
+            const baseURL = new URL('https://mattermost.com/');
+            const externalURL = new URL('wss://mattermost.com/plugins/x');
+            expect(isInternalURL(externalURL, baseURL, false, true)).toBe(true);
+        });
+
+        it('should not allow web socket protocol equivalent when security is different', () => {
+            const baseURL = new URL('https://mattermost.com/');
+            const externalURL = new URL('ws://mattermost.com/plugins/x');
+            expect(isInternalURL(externalURL, baseURL, false, true)).toBe(false);
         });
     });
-
-    describe('getFormattedPathName', () => {
-        it('should format all to lower case', () => {
-            const unformattedPathName = '/aAbBbB/cC/DdeR/';
-            expect(getFormattedPathName(unformattedPathName)).toBe('/aabbbb/cc/dder/');
+    describe('isTrustedURL', () => {
+        it('base urls', () => {
+            const url1 = new URL('http://server-1.com');
+            const url2 = new URL('http://server-1.com');
+            expect(isTrustedURL(url1, url2)).toBe(true);
         });
 
-        it('should add trailing slash', () => {
-            const unformattedPathName = '/aAbBbB/cC/DdeR';
-            expect(getFormattedPathName(unformattedPathName)).toBe('/aabbbb/cc/dder/');
+        it('different urls', () => {
+            const url1 = new URL('http://server-1.com');
+            const url2 = new URL('http://server-2.com');
+            expect(isTrustedURL(url1, url2)).toBe(false);
+        });
+
+        it('same host, different subpath', () => {
+            const url1 = new URL('http://server-1.com/subpath');
+            const url2 = new URL('http://server-1.com');
+            expect(isTrustedURL(url1, url2)).toBe(true);
+        });
+
+        it('same host and subpath', () => {
+            const url1 = new URL('http://server-1.com/subpath');
+            const url2 = new URL('http://server-1.com/subpath');
+            expect(isTrustedURL(url1, url2)).toBe(true);
+        });
+
+        it('same host, different URL scheme', () => {
+            const url1 = new URL('http://server-1.com');
+            const url2 = new URL('mattermost://server-1.com');
+            expect(isTrustedURL(url1, url2)).toBe(false);
+        });
+
+        it('same host, different ports', () => {
+            const url1 = new URL('http://server-1.com:8080');
+            const url2 = new URL('http://server-1.com');
+            expect(isTrustedURL(url1, url2)).toBe(false);
         });
     });
 
@@ -172,245 +295,61 @@ describe('common/utils/url', () => {
         });
     });
 
-    describe('getView', () => {
-        const servers = [
-            {
-                name: 'server-1',
-                url: 'http://server-1.com',
-                tabs: [
-                    {
-                        name: 'tab',
-                    },
-                    {
-                        name: 'tab-type1',
-                    },
-                    {
-                        name: 'tab-type2',
-                    },
-                ],
-            },
-            {
-                name: 'server-2',
-                url: 'http://server-2.com/subpath',
-                tabs: [
-                    {
-                        name: 'tab-type1',
-                    },
-                    {
-                        name: 'tab-type2',
-                    },
-                    {
-                        name: 'tab',
-                    },
-                ],
-            },
-        ];
-
-        it('should match the correct server - base URL', () => {
-            const inputURL = new URL('http://server-1.com');
-            expect(urlUtils.getView(inputURL, servers)).toStrictEqual({name: 'server-1_tab', url: 'http://server-1.com/'});
-        });
-
-        it('should match the correct server - base tab', () => {
-            const inputURL = new URL('http://server-1.com/team');
-            expect(urlUtils.getView(inputURL, servers)).toStrictEqual({name: 'server-1_tab', url: 'http://server-1.com/'});
-        });
-
-        it('should match the correct server - different tab', () => {
-            const inputURL = new URL('http://server-1.com/type1/app');
-            expect(urlUtils.getView(inputURL, servers)).toStrictEqual({name: 'server-1_tab-type1', url: 'http://server-1.com/type1'});
-        });
-
-        it('should return undefined for server with subpath and URL without', () => {
-            const inputURL = new URL('http://server-2.com');
-            expect(urlUtils.getView(inputURL, servers)).toBe(undefined);
-        });
-
-        it('should return undefined for server with subpath and URL with wrong subpath', () => {
-            const inputURL = new URL('http://server-2.com/different/subpath');
-            expect(urlUtils.getView(inputURL, servers)).toBe(undefined);
-        });
-
-        it('should match the correct server with a subpath - base URL', () => {
-            const inputURL = new URL('http://server-2.com/subpath');
-            expect(urlUtils.getView(inputURL, servers)).toStrictEqual({name: 'server-2_tab', url: 'http://server-2.com/subpath/'});
-        });
-
-        it('should match the correct server with a subpath - base tab', () => {
-            const inputURL = new URL('http://server-2.com/subpath/team');
-            expect(urlUtils.getView(inputURL, servers)).toStrictEqual({name: 'server-2_tab', url: 'http://server-2.com/subpath/'});
-        });
-
-        it('should match the correct server with a subpath - different tab', () => {
-            const inputURL = new URL('http://server-2.com/subpath/type2/team');
-            expect(urlUtils.getView(inputURL, servers)).toStrictEqual({name: 'server-2_tab-type2', url: 'http://server-2.com/subpath/type2'});
-        });
-
-        it('should return undefined for wrong server', () => {
-            const inputURL = new URL('http://server-3.com');
-            expect(urlUtils.getView(inputURL, servers)).toBe(undefined);
-        });
-    });
-
-    describe('equalUrls', () => {
-        it('base urls', () => {
-            const url1 = new URL('http://server-1.com');
-            const url2 = new URL('http://server-1.com');
-            expect(equalUrlsIgnoringSubpath(url1, url2)).toBe(true);
-            expect(equalUrlsWithSubpath(url1, url2)).toBe(true);
-        });
-
-        it('different urls', () => {
-            const url1 = new URL('http://server-1.com');
-            const url2 = new URL('http://server-2.com');
-            expect(equalUrlsIgnoringSubpath(url1, url2)).toBe(false);
-            expect(equalUrlsWithSubpath(url1, url2)).toBe(false);
-        });
-
-        it('same host, different subpath', () => {
-            const url1 = new URL('http://server-1.com/subpath');
-            const url2 = new URL('http://server-1.com');
-            expect(equalUrlsIgnoringSubpath(url1, url2)).toBe(true);
-            expect(equalUrlsWithSubpath(url1, url2)).toBe(false);
-        });
-
-        it('same host and subpath', () => {
-            const url1 = new URL('http://server-1.com/subpath');
-            const url2 = new URL('http://server-1.com/subpath');
-            expect(equalUrlsIgnoringSubpath(url1, url2)).toBe(true);
-            expect(equalUrlsWithSubpath(url1, url2)).toBe(true);
-        });
-
-        it('same host, different URL scheme', () => {
-            const url1 = new URL('http://server-1.com');
-            const url2 = new URL('mattermost://server-1.com');
-            expect(equalUrlsIgnoringSubpath(url1, url2)).toBe(false);
-            expect(equalUrlsWithSubpath(url1, url2)).toBe(false);
-        });
-
-        it('same host, different URL scheme, with ignore scheme', () => {
-            const url1 = new URL('http://server-1.com');
-            const url2 = new URL('mattermost://server-1.com');
-            expect(equalUrlsIgnoringSubpath(url1, url2, true)).toBe(true);
-            expect(equalUrlsWithSubpath(url1, url2, true)).toBe(true);
-        });
-
-        it('same host, different ports', () => {
-            const url1 = new URL('http://server-1.com:8080');
-            const url2 = new URL('http://server-1.com');
-            expect(equalUrlsIgnoringSubpath(url1, url2, true)).toBe(false);
-            expect(equalUrlsWithSubpath(url1, url2, true)).toBe(false);
-        });
-    });
-
-    describe('isCustomLoginURL', () => {
+    describe('isCallsPopOutURL', () => {
         it('should match correct URL', () => {
-            expect(urlUtils.isCustomLoginURL(
-                'http://server.com/oauth/authorize',
-                {
-                    url: 'http://server.com',
-                },
-                [
-                    {
-                        name: 'a',
-                        url: 'http://server.com',
-                        tabs: [
-                            {
-                                name: 'tab',
-                            },
-                        ],
-                    },
-                ])).toBe(true);
+            expect(isCallsPopOutURL(
+                new URL('http://example.org'),
+                new URL('http://example.org/team/com.mattermost.calls/expanded/callid'),
+                'callid',
+            )).toBe(true);
         });
-        it('should not match incorrect URL', () => {
-            expect(urlUtils.isCustomLoginURL(
-                'http://server.com/oauth/notauthorize',
-                {
-                    url: 'http://server.com',
-                },
-                [
-                    {
-                        name: 'a',
-                        url: 'http://server.com',
-                        tabs: [
-                            {
-                                name: 'tab',
-                            },
-                        ],
-                    },
-                ])).toBe(false);
-        });
-        it('should not match base URL', () => {
-            expect(urlUtils.isCustomLoginURL(
-                'http://server.com/',
-                {
-                    url: 'http://server.com',
-                },
-                [
-                    {
-                        name: 'a',
-                        url: 'http://server.com',
-                        tabs: [
-                            {
-                                name: 'tab',
-                            },
-                        ],
-                    },
-                ])).toBe(false);
-        });
+
         it('should match with subpath', () => {
-            expect(urlUtils.isCustomLoginURL(
-                'http://server.com/subpath/oauth/authorize',
-                {
-                    url: 'http://server.com/subpath',
-                },
-                [
-                    {
-                        name: 'a',
-                        url: 'http://server.com/subpath',
-                        tabs: [
-                            {
-                                name: 'tab',
-                            },
-                        ],
-                    },
-                ])).toBe(true);
+            expect(isCallsPopOutURL(
+                new URL('http://example.org/subpath'),
+                new URL('http://example.org/subpath/team/com.mattermost.calls/expanded/callid'),
+                'callid',
+            )).toBe(true);
         });
-        it('should not match with different subpath', () => {
-            expect(urlUtils.isCustomLoginURL(
-                'http://server.com/subpath/oauth/authorize',
-                {
-                    url: 'http://server.com/different/subpath',
-                },
-                [
-                    {
-                        name: 'a',
-                        url: 'http://server.com/different/subpath',
-                        tabs: [
-                            {
-                                name: 'tab',
-                            },
-                        ],
-                    },
-                ])).toBe(false);
+
+        it('should match with teamname with dash', () => {
+            expect(isCallsPopOutURL(
+                new URL('http://example.org'),
+                new URL('http://example.org/team-name/com.mattermost.calls/expanded/callid'),
+                'callid',
+            )).toBe(true);
         });
-        it('should not match with oauth subpath', () => {
-            expect(urlUtils.isCustomLoginURL(
-                'http://server.com/oauth/authorize',
-                {
-                    url: 'http://server.com/oauth/authorize',
-                },
-                [
-                    {
-                        name: 'a',
-                        url: 'http://server.com/oauth/authorize',
-                        tabs: [
-                            {
-                                name: 'tab',
-                            },
-                        ],
-                    },
-                ])).toBe(false);
+
+        it('should not match with invalid team name', () => {
+            expect(isCallsPopOutURL(
+                new URL('http://example.org'),
+                new URL('http://example.org/invalid$team/com.mattermost.calls/expanded/othercallid'),
+                'callid',
+            )).toBe(false);
+        });
+
+        it('should not match with incorrect callid', () => {
+            expect(isCallsPopOutURL(
+                new URL('http://example.org'),
+                new URL('http://example.org/team/com.mattermost.calls/expanded/othercallid'),
+                'callid',
+            )).toBe(false);
+        });
+
+        it('should not match with incorrect origin', () => {
+            expect(isCallsPopOutURL(
+                new URL('http://example.com'),
+                new URL('http://example.org/team/com.mattermost.calls/expanded/callid'),
+                'callid',
+            )).toBe(false);
+        });
+
+        it('should match with regex path embedded', () => {
+            expect(isCallsPopOutURL(
+                new URL('http://example.com/path(a+)+'),
+                new URL('http://example.org//path\\(a\\+\\)\\+/team/com.mattermost.calls/expanded/callid'),
+                'callid',
+            )).toBe(false);
         });
     });
 });

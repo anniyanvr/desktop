@@ -1,68 +1,116 @@
 // Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {RemoteInfo} from 'types/server';
+import type {Session} from 'electron';
 
-import {MattermostServer} from 'common/servers/MattermostServer';
+import type {MattermostServer} from 'common/servers/MattermostServer';
+import {parseURL} from 'common/utils/url';
+
+import type {ClientConfig, RemoteInfo} from 'types/server';
+import type {SAField} from 'types/sessionAttributes';
 
 import {getServerAPI} from './serverAPI';
 
 export class ServerInfo {
-    server: MattermostServer;
-    remoteInfo: RemoteInfo;
-    promise: Promise<RemoteInfo | string | undefined>;
-    onRetrievedRemoteInfo?: (result?: RemoteInfo | string) => void;
+    private server: MattermostServer;
+    private remoteInfo: RemoteInfo;
 
     constructor(server: MattermostServer) {
         this.server = server;
-        this.remoteInfo = {name: server.name};
-
-        this.promise = new Promise<RemoteInfo | string | undefined>((resolve) => {
-            this.onRetrievedRemoteInfo = resolve;
-        });
-        this.getRemoteInfo();
+        this.remoteInfo = {};
     }
 
-    getRemoteInfo = () => {
-        getServerAPI<{Version: string}>(
-            new URL(`${this.server.url.toString()}/api/v4/config/client?format=old`),
-            false,
-            this.onGetConfig,
-            this.onRetrievedRemoteInfo,
-            this.onRetrievedRemoteInfo);
-
-        getServerAPI<Array<{id: string; version: string}>>(
-            new URL(`${this.server.url.toString()}/api/v4/plugins/webapp`),
-            false,
-            this.onGetPlugins,
-            this.onRetrievedRemoteInfo,
-            this.onRetrievedRemoteInfo);
-    }
-
-    onGetConfig = (data: {Version: string}) => {
-        this.remoteInfo.serverVersion = data.Version;
-
-        this.trySendRemoteInfo();
-    }
-
-    onGetPlugins = (data: Array<{id: string; version: string}>) => {
-        this.remoteInfo.hasFocalboard = data.some((plugin) => plugin.id === 'focalboard');
-        this.remoteInfo.hasPlaybooks = data.some((plugin) => plugin.id === 'playbooks');
-
-        this.trySendRemoteInfo();
-    }
-
-    trySendRemoteInfo = () => {
-        if (this.isRemoteInfoRetrieved()) {
-            this.onRetrievedRemoteInfo?.(this.remoteInfo);
-        }
-    }
-
-    isRemoteInfoRetrieved = () => {
-        return !(
-            typeof this.remoteInfo.serverVersion === 'undefined' ||
-            typeof this.remoteInfo.hasFocalboard === 'undefined' ||
-            typeof this.remoteInfo.hasPlaybooks === 'undefined'
+    pingServer = async (session?: Session) => {
+        await this.getRemoteInfo<{status: string}>(
+            () => {}, // No callback needed for ping, just checking if it responds
+            parseURL(`${this.server.url}/api/v4/system/ping`),
+            session,
         );
-    }
+    };
+
+    fetchConfigData = async (session?: Session) => {
+        await this.getRemoteInfo<ClientConfig>(
+            this.onGetConfig,
+            parseURL(`${this.server.url}/api/v4/config/client?format=old`),
+            session,
+        );
+
+        return this.remoteInfo;
+    };
+
+    fetchRemoteInfo = async () => {
+        await this.fetchConfigData();
+        await this.getRemoteInfo<Array<{id: string; version: string}>>(
+            this.onGetPlugins,
+            parseURL(`${this.server.url}/api/v4/plugins/webapp`),
+        );
+        await this.getRemoteInfo<{SkuShortName: string}>(
+            this.onGetLicense,
+            parseURL(`${this.server.url}/api/v4/license/client?format=old`),
+        );
+        if (this.remoteInfo.sessionAttributesEnabled) {
+            await this.getRemoteInfo<SAField[]>(
+                this.onGetSessionAttributesManifest,
+                parseURL(`${this.server.url}/api/v4/users/sessions/attributes/manifest`),
+            );
+        }
+
+        return this.remoteInfo;
+    };
+
+    private getRemoteInfo = <T>(
+        callback: (data: T) => void,
+        url?: URL,
+        session?: Session,
+    ) => {
+        if (!url) {
+            return Promise.reject(new Error('Malformed URL'));
+        }
+        return new Promise<void>((resolve, reject) => {
+            getServerAPI(
+                url,
+                false,
+                (raw: string) => {
+                    try {
+                        const data = JSON.parse(raw) as T;
+                        callback(data);
+                        resolve();
+                    } catch (e) {
+                        reject(e);
+                    }
+                },
+                () => reject(new Error('Aborted')),
+                (error: Error, errorReason?: {needsBasicAuth?: boolean; needsPreAuth?: boolean}) => {
+                    const enhancedError = error as Error & { errorReason?: {needsBasicAuth?: boolean; needsPreAuth?: boolean} };
+                    enhancedError.errorReason = errorReason;
+                    reject(enhancedError);
+                },
+                session,
+            );
+        });
+    };
+
+    private onGetConfig = (data: ClientConfig) => {
+        this.remoteInfo.serverVersion = data.Version;
+        this.remoteInfo.sessionAttributesEnabled = data.FeatureFlagSessionAttributes === 'true';
+        this.remoteInfo.siteURL = data.SiteURL;
+        this.remoteInfo.siteName = data.SiteName;
+        this.remoteInfo.hasFocalboard = this.remoteInfo.hasFocalboard || data.BuildBoards === 'true';
+        this.remoteInfo.helpLink = data.HelpLink;
+        this.remoteInfo.reportProblemLink = data.ReportAProblemLink;
+    };
+
+    private onGetLicense = (data: {SkuShortName: string}) => {
+        this.remoteInfo.licenseSku = data.SkuShortName;
+    };
+
+    private onGetPlugins = (data: Array<{id: string; version: string}>) => {
+        this.remoteInfo.hasFocalboard = this.remoteInfo.hasFocalboard || data.some((plugin) => plugin.id === 'focalboard');
+        this.remoteInfo.hasPlaybooks = data.some((plugin) => plugin.id === 'playbooks');
+        this.remoteInfo.hasUserSurvey = data.some((plugin) => plugin.id === 'com.mattermost.nps');
+    };
+
+    private onGetSessionAttributesManifest = (data: SAField[]) => {
+        this.remoteInfo.sessionAttributesManifest = data;
+    };
 }

@@ -18,6 +18,10 @@ export let certificateStorePath = '';
 export let trustedOriginsStoreFile = '';
 export let boundsInfoPath = '';
 export let migrationInfoPath = '';
+export let downloadsJson = '';
+export let permissionsJson = '';
+export let developerModeJson = '';
+export let secureStoragePath = '';
 
 export function updatePaths(emit = false) {
     userDataPath = app.getPath('userData');
@@ -29,6 +33,10 @@ export function updatePaths(emit = false) {
     trustedOriginsStoreFile = path.resolve(userDataPath, 'trustedOrigins.json');
     boundsInfoPath = path.join(userDataPath, 'bounds-info.json');
     migrationInfoPath = path.resolve(userDataPath, 'migration-info.json');
+    downloadsJson = path.resolve(userDataPath, 'downloads.json');
+    permissionsJson = path.resolve(userDataPath, 'permissions.json');
+    developerModeJson = path.resolve(userDataPath, 'developerMode.json');
+    secureStoragePath = userDataPath;
 
     if (emit) {
         ipcMain.emit(UPDATE_PATHS);

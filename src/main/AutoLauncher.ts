@@ -5,7 +5,10 @@
 import AutoLaunch from 'auto-launch';
 import {app} from 'electron';
 import isDev from 'electron-is-dev';
-import log from 'electron-log';
+
+import {Logger} from 'common/log';
+
+const log = new Logger('AutoLauncher');
 
 export class AutoLauncher {
     appLauncher: AutoLaunch;
@@ -22,7 +25,7 @@ export class AutoLauncher {
             return;
         }
         const appLauncher = new AutoLaunch({
-            name: 'Mattermost',
+            name: app.name,
         });
         const enabled = await appLauncher.isEnabled();
         if (enabled) {

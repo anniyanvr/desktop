@@ -1,18 +1,25 @@
 // Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {app, BrowserWindow, Event, dialog, WebContents, Certificate} from 'electron';
-import log from 'electron-log';
+import type {BrowserWindow, Event, WebContents, Certificate, Details} from 'electron';
+import {app} from 'electron';
 
-import urlUtils from 'common/utils/url';
-
-import CertificateStore from 'main/certificateStore';
-import {destroyTray} from 'main/tray/tray';
-import WindowManager from 'main/windows/windowManager';
+import MainWindow from 'app/mainWindow/mainWindow';
+import MessageModal from 'app/mainWindow/modals/messageModal';
+import Tray from 'app/system/tray/tray';
+import WebContentsManager from 'app/views/webContentsManager';
+import {Logger} from 'common/log';
+import ServerManager from 'common/servers/serverManager';
+import {parseURL} from 'common/utils/url';
+import {localizeMessage} from 'main/i18nManager';
+import CertificateStore from 'main/security/certificateStore';
+import sentryHandler from 'main/sentryHandler';
 
 import {getDeeplinkingURL, openDeepLink, resizeScreen} from './utils';
 
 export const certificateErrorCallbacks = new Map();
+
+const log = new Logger('App.App');
 
 //
 // app event handlers
@@ -20,13 +27,30 @@ export const certificateErrorCallbacks = new Map();
 
 // activate first app instance, subsequent instances will quit themselves
 export function handleAppSecondInstance(event: Event, argv: string[]) {
+    log.debug('handleAppSecondInstance', {argv});
+
     // Protocol handler for win32
     // argv: An array of the second instance’s (command line / deep linked) arguments
-    const deeplinkingUrl = getDeeplinkingURL(argv);
-    WindowManager.showMainWindow(deeplinkingUrl);
+    const deeplinkingURL = getDeeplinkingURL(argv);
+    if (deeplinkingURL) {
+        openDeepLink(deeplinkingURL);
+    } else if (MainWindow.get()) {
+        MainWindow.show();
+    }
+}
+
+export function handleAppActivate() {
+    if (app.isReady()) {
+        MainWindow.show();
+    } else {
+        // On macOS 'activate' can fire before 'ready' (e.g. clicking the dock icon while still launching).
+        app.once('ready', () => MainWindow.show());
+    }
 }
 
 export function handleAppWindowAllClosed() {
+    log.debug('handleAppWindowAllClosed');
+
     // On OS X it is common for applications and their menu bar
     // to stay active until the user quits explicitly with Cmd + Q
     if (process.platform !== 'darwin') {
@@ -35,14 +59,20 @@ export function handleAppWindowAllClosed() {
 }
 
 export function handleAppBrowserWindowCreated(event: Event, newWindow: BrowserWindow) {
+    log.debug('handleAppBrowserWindowCreated');
+
     // Screen cannot be required before app is ready
-    resizeScreen(newWindow);
+    if (app.isReady()) {
+        resizeScreen(newWindow);
+    } else {
+        newWindow.once('restore', () => resizeScreen(newWindow));
+    }
 }
 
 export function handleAppWillFinishLaunching() {
     // Protocol handler for osx
     app.on('open-url', (event, url) => {
-        log.info(`Handling deeplinking url: ${url}`);
+        log.verbose('Handling deeplinking url');
         event.preventDefault();
         const deeplinkingUrl = getDeeplinkingURL([url]);
         if (deeplinkingUrl) {
@@ -56,27 +86,42 @@ export function handleAppWillFinishLaunching() {
 }
 
 export function handleAppBeforeQuit() {
+    log.debug('handleAppBeforeQuit');
+
     // Make sure tray icon gets removed if the user exits via CTRL-Q
-    destroyTray();
+    sentryHandler.flush();
+    Tray.destroy();
     global.willAppQuit = true;
 }
 
 export async function handleAppCertificateError(event: Event, webContents: WebContents, url: string, error: string, certificate: Certificate, callback: (isTrusted: boolean) => void) {
-    const parsedURL = urlUtils.parseURL(url);
+    log.verbose('handleAppCertificateError', {error});
+
+    const parsedURL = parseURL(url);
     if (!parsedURL) {
         return;
     }
-    const origin = parsedURL.origin;
-    if (CertificateStore.isExplicitlyUntrusted(origin)) {
+    if (CertificateStore.isExplicitlyUntrusted(parsedURL)) {
         event.preventDefault();
-        log.warn(`Ignoring previously untrusted certificate for ${origin}`);
+        log.warn('Ignoring previously untrusted certificate');
         callback(false);
-    } else if (CertificateStore.isTrusted(origin, certificate)) {
+    } else if (CertificateStore.isTrusted(parsedURL, certificate)) {
         event.preventDefault();
         callback(true);
     } else {
     // update the callback
-        const errorID = `${origin}:${error}`;
+        const view = WebContentsManager.getViewByWebContentsId(webContents.id);
+        const errorID = `${view?.serverId}:${parsedURL.origin}:${error}`;
+
+        const server = view && ServerManager.getServer(view.serverId);
+        if (server) {
+            const serverURL = parseURL(server.url);
+            if (serverURL && serverURL.origin !== parsedURL.origin) {
+                log.warn('Ignoring certificate for unmatched origin, will not trust');
+                callback(false);
+                return;
+            }
+        }
 
         // if we are already showing that error, don't add more dialogs
         if (certificateErrorCallbacks.has(errorID)) {
@@ -84,50 +129,60 @@ export async function handleAppCertificateError(event: Event, webContents: WebCo
             certificateErrorCallbacks.set(errorID, callback);
             return;
         }
-        const extraDetail = CertificateStore.isExisting(origin) ? 'Certificate is different from previous one.\n\n' : '';
-        const detail = `${extraDetail}origin: ${origin}\nError: ${error}`;
+        const extraDetail = CertificateStore.isExisting(parsedURL) ? localizeMessage('main.app.app.handleAppCertificateError.dialog.extraDetail', 'Certificate is different from previous one.\n\n') : '';
+        const detail = localizeMessage('main.app.app.handleAppCertificateError.certError.dialog.detail', '{extraDetail}origin: {origin}\nError: {error}', {extraDetail, origin: parsedURL.origin, error});
 
         certificateErrorCallbacks.set(errorID, callback);
 
-        // TODO: should we move this to window manager or provide a handler for dialogs?
-        const mainWindow = WindowManager.getMainWindow();
+        const mainWindow = MainWindow.get();
         if (!mainWindow) {
             return;
         }
 
         try {
-            let result = await dialog.showMessageBox(mainWindow, {
-                title: 'Certificate Error',
-                message: 'There is a configuration issue with this Mattermost server, or someone is trying to intercept your connection. You also may need to sign into the Wi-Fi you are connected to using your web browser.',
+            let result = await MessageModal.showMessageModal({
+                title: localizeMessage('main.app.app.handleAppCertificateError.certError.dialog.title', 'Certificate Error'),
+                message: localizeMessage('main.app.app.handleAppCertificateError.certError.dialog.message', 'There is a problem with the security certificate for this server or for embedded content in a message. Please contact your Mattermost admin or IT department to resolve this issue.'),
                 type: 'error',
                 detail,
-                buttons: ['More Details', 'Cancel Connection'],
+                buttons: [
+                    localizeMessage('main.app.app.handleAppCertificateError.certError.button.moreDetails', 'More Details'),
+                    localizeMessage('main.app.app.handleAppCertificateError.certError.button.cancelConnection', 'Cancel Connection'),
+                ],
                 cancelId: 1,
-            });
+            }, {serverId: view?.serverId});
 
             if (result.response === 0) {
-                result = await dialog.showMessageBox(mainWindow, {
-                    title: 'Certificate Not Trusted',
-                    message: `Certificate from "${certificate.issuerName}" is not trusted.`,
+                result = await MessageModal.showMessageModal({
+                    title: localizeMessage('main.app.app.handleAppCertificateError.certNotTrusted.dialog.title', 'Certificate Not Trusted'),
+                    message: localizeMessage('main.app.app.handleAppCertificateError.certNotTrusted.dialog.message', 'Certificate from "{issuerName}" is not trusted.', {issuerName: certificate.issuerName}),
                     detail: extraDetail,
                     type: 'error',
-                    buttons: ['Trust Insecure Certificate', 'Cancel Connection'],
+                    buttons: [
+                        localizeMessage('main.app.app.handleAppCertificateError.certNotTrusted.button.trustInsecureCertificate', 'Trust Insecure Certificate'),
+                        localizeMessage('main.app.app.handleAppCertificateError.certNotTrusted.button.cancelConnection', 'Cancel Connection'),
+                    ],
                     cancelId: 1,
                     checkboxChecked: false,
                     checkboxLabel: "Don't ask again",
-                });
+                }, {serverId: view?.serverId});
             } else {
                 result = {response: result.response, checkboxChecked: false};
             }
 
             if (result.response === 0) {
-                CertificateStore.add(origin, certificate);
+                CertificateStore.add(parsedURL, certificate);
                 CertificateStore.save();
                 certificateErrorCallbacks.get(errorID)(true);
-                webContents.loadURL(url);
+
+                if (view) {
+                    view.load(url);
+                } else {
+                    webContents.loadURL(url);
+                }
             } else {
                 if (result.checkboxChecked) {
-                    CertificateStore.add(origin, certificate, true);
+                    CertificateStore.add(parsedURL, certificate, true);
                     CertificateStore.save();
                 }
                 certificateErrorCallbacks.get(errorID)(false);
@@ -140,6 +195,6 @@ export async function handleAppCertificateError(event: Event, webContents: WebCo
     }
 }
 
-export function handleAppGPUProcessCrashed(event: Event, killed: boolean) {
-    log.error(`The GPU process has crashed (killed = ${killed})`);
+export function handleChildProcessGone(event: Event, details: Details) {
+    log.error('"child-process-gone" The child process has crashed. Details: ', {details});
 }

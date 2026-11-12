@@ -1,122 +1,102 @@
 // Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import Config from 'common/config';
-import {TAB_MESSAGING, TAB_FOCALBOARD, TAB_PLAYBOOKS} from 'common/tabs/TabView';
-import Utils from 'common/utils/util';
+import {screen} from 'electron';
 
+import MainWindow from 'app/mainWindow/mainWindow';
+import {MattermostServer} from 'common/servers/MattermostServer';
+import ServerManager from 'common/servers/serverManager';
 import {ServerInfo} from 'main/server/serverInfo';
 
-import {getDeeplinkingURL, updateServerInfos, resizeScreen} from './utils';
+import {getDeeplinkingURL, resizeScreen, updateServerInfos} from './utils';
 
-jest.mock('electron-log', () => ({
-    info: jest.fn(),
+jest.mock('fs', () => ({
+    readFileSync: jest.fn(),
+    writeFileSync: jest.fn(),
+    existsSync: jest.fn(),
+    cpSync: jest.fn(),
 }));
+
+jest.mock('electron', () => ({
+    app: {
+        getPath: () => '/path/to/data',
+        getAppPath: () => '/path/to/app',
+    },
+    nativeImage: {
+        createFromPath: jest.fn(),
+    },
+    dialog: {
+        showOpenDialogSync: jest.fn(),
+        showMessageBoxSync: jest.fn(),
+    },
+    screen: {
+        getAllDisplays: jest.fn(),
+    },
+}));
+
+jest.mock('electron-is-dev', () => false);
 
 jest.mock('common/config', () => ({
-    set: jest.fn(),
+    setServers: jest.fn(),
 }));
-jest.mock('common/utils/util', () => ({
-    isVersionGreaterThanOrEqualTo: jest.fn(),
-    getDisplayBoundaries: jest.fn(),
+jest.mock('common/JsonFileManager');
+
+jest.mock('main/updateNotifier', () => ({}));
+jest.mock('main/constants', () => ({
+    updatePaths: jest.fn(),
+    secureStoragePath: '/path/to/secure',
+}));
+jest.mock('main/i18nManager', () => ({
+    localizeMessage: jest.fn(),
+}));
+jest.mock('app/menus', () => ({
+    refreshMenu: jest.fn(),
+}));
+jest.mock('app/views/webContentsManager', () => ({
+    on: jest.fn(),
+}));
+jest.mock('app/mainWindow/mainWindow', () => ({
+    get: jest.fn(),
+    getSize: jest.fn(),
+    on: jest.fn(),
+}));
+jest.mock('app/mainWindow/modals/messageModal', () => ({
+    __esModule: true,
+    default: {
+        showMessageModal: jest.fn(),
+        showErrorModal: jest.fn(),
+    },
 }));
 
-jest.mock('main/menus/app', () => ({}));
-jest.mock('main/menus/tray', () => ({}));
-jest.mock('main/server/serverInfo', () => ({
-    ServerInfo: jest.fn(),
+jest.mock('app/tabs/tabManager', () => ({
+    focusCurrentTab: jest.fn(),
 }));
-jest.mock('main/tray/tray', () => ({}));
-jest.mock('main/windows/windowManager', () => ({}));
+
+jest.mock('app/navigationManager', () => ({
+    openLinkInPrimaryTab: jest.fn(),
+}));
 
 jest.mock('./initialize', () => ({
     mainProtocol: 'mattermost',
 }));
 
+jest.mock('common/servers/MattermostServer', () => ({
+    MattermostServer: jest.fn().mockImplementation((config) => ({
+        id: config.id || 'server-1',
+        name: config.name || 'Test Server',
+        url: config.url || 'http://localhost:8065',
+    })),
+}));
+
+jest.mock('common/servers/serverManager', () => ({
+    updateRemoteInfo: jest.fn(),
+}));
+
+jest.mock('main/server/serverInfo', () => ({
+    ServerInfo: jest.fn(),
+}));
+
 describe('main/app/utils', () => {
-    describe('updateServerInfos', () => {
-        const tabs = [
-            {
-                name: TAB_MESSAGING,
-                order: 0,
-                isOpen: true,
-            },
-            {
-                name: TAB_FOCALBOARD,
-                order: 2,
-            },
-            {
-                name: TAB_PLAYBOOKS,
-                order: 1,
-            },
-        ];
-        const teams = [
-            {
-                name: 'server-1',
-                url: 'http://server-1.com',
-                tabs,
-            },
-        ];
-
-        beforeEach(() => {
-            Utils.isVersionGreaterThanOrEqualTo.mockImplementation((version) => version === '6.0.0');
-            Config.set.mockImplementation((name, value) => {
-                Config[name] = value;
-            });
-            const teamsCopy = JSON.parse(JSON.stringify(teams));
-            Config.teams = teamsCopy;
-        });
-
-        afterEach(() => {
-            delete Config.teams;
-        });
-
-        it('should open all tabs', async () => {
-            ServerInfo.mockReturnValue({promise: {
-                name: 'server-1',
-                serverVersion: '6.0.0',
-                hasPlaybooks: true,
-                hasFocalboard: true,
-            }});
-
-            updateServerInfos(Config.teams);
-            await new Promise(setImmediate); // workaround since Promise.all seems to not let me wait here
-
-            expect(Config.teams.find((team) => team.name === 'server-1').tabs.find((tab) => tab.name === TAB_PLAYBOOKS).isOpen).toBe(true);
-            expect(Config.teams.find((team) => team.name === 'server-1').tabs.find((tab) => tab.name === TAB_FOCALBOARD).isOpen).toBe(true);
-        });
-
-        it('should open only playbooks', async () => {
-            ServerInfo.mockReturnValue({promise: {
-                name: 'server-1',
-                serverVersion: '6.0.0',
-                hasPlaybooks: true,
-                hasFocalboard: false,
-            }});
-
-            updateServerInfos(Config.teams);
-            await new Promise(setImmediate); // workaround since Promise.all seems to not let me wait here
-
-            expect(Config.teams.find((team) => team.name === 'server-1').tabs.find((tab) => tab.name === TAB_PLAYBOOKS).isOpen).toBe(true);
-            expect(Config.teams.find((team) => team.name === 'server-1').tabs.find((tab) => tab.name === TAB_FOCALBOARD).isOpen).toBeUndefined();
-        });
-
-        it('should open none when server version is too old', async () => {
-            ServerInfo.mockReturnValue({promise: {
-                name: 'server-1',
-                serverVersion: '5.0.0',
-                hasPlaybooks: true,
-                hasFocalboard: true,
-            }});
-
-            updateServerInfos(Config.teams);
-            await new Promise(setImmediate); // workaround since Promise.all seems to not let me wait here
-
-            expect(Config.teams.find((team) => team.name === 'server-1').tabs.find((tab) => tab.name === TAB_PLAYBOOKS).isOpen).toBeUndefined();
-            expect(Config.teams.find((team) => team.name === 'server-1').tabs.find((tab) => tab.name === TAB_FOCALBOARD).isOpen).toBeUndefined();
-        });
-    });
-
     describe('getDeeplinkingURL', () => {
         it('should return undefined if deeplinking URL is not last argument', () => {
             expect(getDeeplinkingURL(['mattermost', 'mattermost://server-1.com', '--oops'])).toBeUndefined();
@@ -133,13 +113,13 @@ describe('main/app/utils', () => {
 
     describe('resizeScreen', () => {
         beforeEach(() => {
-            Utils.getDisplayBoundaries.mockReturnValue([{
-                minX: 400,
-                minY: 300,
-                maxX: 2320,
-                maxY: 1380,
-                width: 1920,
-                height: 1080,
+            screen.getAllDisplays.mockReturnValue([{
+                workArea: {
+                    x: 400,
+                    y: 300,
+                    width: 1920,
+                    height: 1080,
+                },
             }]);
         });
         it('should keep the same position if it is within a display', () => {
@@ -148,7 +128,7 @@ describe('main/app/utils', () => {
                 getSize: () => [1280, 720],
                 setPosition: jest.fn(),
                 center: jest.fn(),
-                on: jest.fn(),
+                once: jest.fn(),
             };
             resizeScreen(browserWindow);
             expect(browserWindow.setPosition).toHaveBeenCalledWith(500, 400);
@@ -160,7 +140,7 @@ describe('main/app/utils', () => {
                 getSize: () => [1280, 720],
                 setPosition: jest.fn(),
                 center: jest.fn(),
-                on: jest.fn(),
+                once: jest.fn(),
             };
             resizeScreen(browserWindow);
             expect(browserWindow.setPosition).toHaveBeenCalledWith(1680, 400);
@@ -170,7 +150,7 @@ describe('main/app/utils', () => {
                 getSize: () => [1280, 720],
                 setPosition: jest.fn(),
                 center: jest.fn(),
-                on: jest.fn(),
+                once: jest.fn(),
             };
             resizeScreen(browserWindow);
             expect(browserWindow.setPosition).toHaveBeenCalledWith(500, 1020);
@@ -182,11 +162,142 @@ describe('main/app/utils', () => {
                 getSize: () => [1280, 720],
                 setPosition: jest.fn(),
                 center: jest.fn(),
-                on: jest.fn(),
+                once: jest.fn(),
             };
             resizeScreen(browserWindow);
             expect(browserWindow.setPosition).not.toHaveBeenCalled();
             expect(browserWindow.center).toHaveBeenCalled();
+        });
+
+        it('should snap to main window if it exists', () => {
+            MainWindow.get.mockReturnValue({
+                getPosition: () => [450, 350],
+                getSize: () => [1280, 720],
+            });
+            const browserWindow = {
+                getPosition: () => [500, 400],
+                getSize: () => [1280, 720],
+                setPosition: jest.fn(),
+                center: jest.fn(),
+                once: jest.fn(),
+            };
+            resizeScreen(browserWindow);
+            expect(browserWindow.setPosition).toHaveBeenCalledWith(450, 350);
+        });
+
+        it('should snap to the middle of the main window', () => {
+            MainWindow.get.mockReturnValue({
+                getPosition: () => [450, 350],
+                getSize: () => [1280, 720],
+            });
+            const browserWindow = {
+                getPosition: () => [500, 400],
+                getSize: () => [800, 600],
+                setPosition: jest.fn(),
+                center: jest.fn(),
+                once: jest.fn(),
+            };
+            resizeScreen(browserWindow);
+            expect(browserWindow.setPosition).toHaveBeenCalledWith(690, 410);
+        });
+
+        it('should never return non-integer value', () => {
+            MainWindow.get.mockReturnValue({
+                getPosition: () => [450, 350],
+                getSize: () => [1280, 720],
+            });
+            const browserWindow = {
+                getPosition: () => [450, 350],
+                getSize: () => [1281, 721],
+                setPosition: jest.fn(),
+                center: jest.fn(),
+                once: jest.fn(),
+            };
+            resizeScreen(browserWindow);
+            expect(browserWindow.setPosition).toHaveBeenCalledWith(449, 349);
+        });
+
+        it('should keep position when the window midpoint is on a second display', () => {
+            MainWindow.get.mockReturnValue(undefined);
+            screen.getAllDisplays.mockReturnValue([
+                {
+                    workArea: {
+                        x: 0,
+                        y: 0,
+                        width: 1920,
+                        height: 1080,
+                    },
+                },
+                {
+                    workArea: {
+                        x: 1920,
+                        y: 0,
+                        width: 1920,
+                        height: 1080,
+                    },
+                },
+            ]);
+            const browserWindow = {
+                getPosition: () => [2200, 100],
+                getSize: () => [1280, 720],
+                setPosition: jest.fn(),
+                center: jest.fn(),
+                once: jest.fn(),
+            };
+            resizeScreen(browserWindow);
+            expect(browserWindow.setPosition).toHaveBeenCalledWith(2200, 100);
+            expect(browserWindow.center).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('updateServerInfos', () => {
+        beforeEach(() => {
+            jest.clearAllMocks();
+        });
+
+        it('should catch error when ServerInfo.fetchRemoteInfo throws', async () => {
+            const mockServer = new MattermostServer({id: 'server-1', name: 'Test Server', url: 'http://localhost:8065'});
+            const mockError = new Error('Network error');
+            const mockServerInfoInstance = {
+                fetchRemoteInfo: jest.fn().mockRejectedValue(mockError),
+            };
+            ServerInfo.mockImplementation(() => mockServerInfoInstance);
+
+            await updateServerInfos([mockServer]);
+
+            expect(mockServerInfoInstance.fetchRemoteInfo).toHaveBeenCalled();
+            expect(ServerManager.updateRemoteInfo).not.toHaveBeenCalled();
+        });
+
+        it('should record the server as unvalidated when the site URL cannot be parsed', async () => {
+            const mockServer = new MattermostServer({id: 'server-1', name: 'Test Server', url: 'http://localhost:8065'});
+            const data = {siteURL: 'not-a-url'};
+            const mockServerInfoInstance = {
+                fetchRemoteInfo: jest.fn().mockResolvedValue(data),
+                fetchConfigData: jest.fn(),
+            };
+            ServerInfo.mockImplementation(() => mockServerInfoInstance);
+
+            await updateServerInfos([mockServer]);
+
+            expect(MattermostServer).not.toHaveBeenCalledWith({name: 'temp', url: 'not-a-url'}, false);
+            expect(mockServerInfoInstance.fetchConfigData).not.toHaveBeenCalled();
+            expect(ServerManager.updateRemoteInfo).toHaveBeenCalledWith('server-1', data, false);
+        });
+
+        it('should record the server as validated when the site URL matches', async () => {
+            const mockServer = new MattermostServer({id: 'server-1', name: 'Test Server', url: 'http://localhost:8065'});
+            const data = {siteURL: 'http://localhost:8065'};
+            const mockServerInfoInstance = {
+                fetchRemoteInfo: jest.fn().mockResolvedValue(data),
+                fetchConfigData: jest.fn().mockResolvedValue(data),
+            };
+            ServerInfo.mockImplementation(() => mockServerInfoInstance);
+
+            await updateServerInfos([mockServer]);
+
+            expect(MattermostServer).toHaveBeenCalledWith({name: 'temp', url: 'http://localhost:8065/'}, false);
+            expect(ServerManager.updateRemoteInfo).toHaveBeenCalledWith('server-1', data, true);
         });
     });
 });

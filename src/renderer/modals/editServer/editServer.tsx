@@ -1,58 +1,48 @@
 // Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import 'bootstrap/dist/css/bootstrap.min.css';
-import 'renderer/css/modals.css';
-
 import React, {useEffect, useState} from 'react';
 import ReactDOM from 'react-dom';
 
-import {TeamWithIndex} from 'types/config';
-import {ModalMessage} from 'types/modals';
+import IntlProvider from 'renderer/intl_provider';
 
-import {MODAL_CANCEL, MODAL_INFO, MODAL_RESULT, RETRIEVE_MODAL_INFO} from 'common/communication';
+import type {Server} from 'types/config';
+import type {Permissions, UniqueServerWithPermissions} from 'types/permissions';
 
-import NewTeamModal from '../../components/NewTeamModal'; //'./addServer.jsx';
-
+import NewServerModal from '../../components/NewServerModal';
 import setupDarkMode from '../darkMode';
 
 setupDarkMode();
 
 const onClose = () => {
-    window.postMessage({type: MODAL_CANCEL}, window.location.href);
+    window.desktop.modals.cancelModal();
 };
 
-const onSave = (data: TeamWithIndex) => {
-    window.postMessage({type: MODAL_RESULT, data}, window.location.href);
+const onSave = (server: Server, permissions?: Permissions) => {
+    window.desktop.modals.finishModal({server, permissions});
 };
 
 const EditServerModalWrapper: React.FC = () => {
-    const [server, setServer] = useState<TeamWithIndex>();
-
-    const handleEditServerMessage = (event: {data: ModalMessage<TeamWithIndex>}) => {
-        switch (event.data.type) {
-        case MODAL_INFO: {
-            setServer(event.data.data);
-            break;
-        }
-        default:
-            break;
-        }
-    };
+    const [data, setData] = useState<UniqueServerWithPermissions>();
 
     useEffect(() => {
-        window.addEventListener('message', handleEditServerMessage);
-        window.postMessage({type: RETRIEVE_MODAL_INFO}, window.location.href);
+        window.desktop.modals.getModalInfo<UniqueServerWithPermissions>().
+            then((data) => {
+                setData(data);
+            });
     }, []);
 
     return (
-        <NewTeamModal
-            onClose={onClose}
-            onSave={onSave}
-            editMode={true}
-            show={Boolean(server)}
-            team={server}
-        />
+        <IntlProvider>
+            <NewServerModal
+                onClose={onClose}
+                onSave={onSave}
+                editMode={true}
+                show={Boolean(data?.server)}
+                server={data?.server}
+                permissions={data?.permissions}
+            />
+        </IntlProvider>
     );
 };
 

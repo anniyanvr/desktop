@@ -1,74 +1,54 @@
 // Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import React from 'react';
+import React, {useState, useEffect} from 'react';
 import ReactDOM from 'react-dom';
 
-import {ModalMessage} from 'types/modals';
-
-import {RECEIVED_LOADING_SCREEN_DATA, GET_LOADING_SCREEN_DATA, LOADING_SCREEN_ANIMATION_FINISHED, TOGGLE_LOADING_SCREEN_VISIBILITY} from 'common/communication';
+import setupDarkMode from 'renderer/modals/darkMode';
 
 import LoadingScreen from '../../components/LoadingScreen';
 
-import 'bootstrap/dist/css/bootstrap.min.css';
-import 'renderer/css/modals.css';
-import 'renderer/css/components/LoadingAnimation.css';
-import 'renderer/css/components/LoadingScreen.css';
+const onFadeOutComplete = () => {
+    window.desktop.loadingScreen.loadingScreenAnimationFinished();
+};
 
-type Props = Record<string, never>;
+const closeDropdowns = () => {
+    window.desktop.closeServersDropdown();
+    window.desktop.closeDownloadsDropdown();
+};
 
-type State = {
-    showLoadingScreen: boolean;
-    darkMode: boolean;
-}
+setupDarkMode();
 
-class LoadingScreenRoot extends React.PureComponent<Props, State> {
-    constructor(props: Props) {
-        super(props);
-        this.state = {
-            showLoadingScreen: true,
-            darkMode: false,
+const LoadingScreenRoot: React.FC = () => {
+    const [showLoadingScreen, setShowLoadingScreen] = useState(true);
+
+    useEffect(() => {
+        const handleToggleLoadingScreenVisibility = (showLoadingScreen: boolean) => {
+            setShowLoadingScreen(showLoadingScreen);
         };
-    }
 
-    componentDidMount() {
-        window.postMessage({type: GET_LOADING_SCREEN_DATA}, window.location.href);
+        const initializeApp = async () => {
+            window.desktop.loadingScreen.onToggleLoadingScreenVisibility(handleToggleLoadingScreenVisibility);
+            window.addEventListener('click', closeDropdowns);
+        };
 
-        window.addEventListener('message', this.handleMessageEvent);
-    }
+        initializeApp();
 
-    componentWillUnmount() {
-        window.removeEventListener('message', this.handleMessageEvent);
-    }
+        // Cleanup function
+        return () => {
+            // Note: In a real app, you might want to remove event listeners here
+            // but since this is a root component that doesn't unmount, it's not strictly necessary
+        };
+    }, []);
 
-    handleMessageEvent = (event: {data: ModalMessage<any>}) => {
-        if (event.data.type === RECEIVED_LOADING_SCREEN_DATA) {
-            this.setState({
-                darkMode: event.data.data.darkMode,
-            });
-        }
+    return (
+        <LoadingScreen
+            loading={showLoadingScreen}
+            onFadeOutComplete={onFadeOutComplete}
+        />
+    );
+};
 
-        if (event.data.type === TOGGLE_LOADING_SCREEN_VISIBILITY) {
-            this.setState({
-                showLoadingScreen: event.data.data,
-            });
-        }
-    }
-
-    onFadeOutComplete = () => {
-        window.postMessage({type: LOADING_SCREEN_ANIMATION_FINISHED}, window.location.href);
-    }
-
-    render() {
-        return (
-            <LoadingScreen
-                loading={this.state.showLoadingScreen}
-                darkMode={this.state.darkMode}
-                onFadeOutComplete={this.onFadeOutComplete}
-            />
-        );
-    }
-}
 const start = async () => {
     ReactDOM.render(
         <LoadingScreenRoot/>,

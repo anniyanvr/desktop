@@ -2,54 +2,19 @@
 // Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import React, {Fragment} from 'react';
-import {Container, Row} from 'react-bootstrap';
-import {DropResult} from 'react-beautiful-dnd';
-import DotsVerticalIcon from 'mdi-react/DotsVerticalIcon';
-import {IpcRendererEvent} from 'electron/renderer';
+import React from 'react';
+import type {DropResult} from 'react-beautiful-dnd';
 
-import {TeamWithTabs} from 'types/config';
+import type {UniqueView, UniqueServer} from 'types/config';
+import type {DownloadedItems} from 'types/downloads';
 
-import {getTabViewName} from 'common/tabs/TabView';
-
-import {
-    FOCUS_BROWSERVIEW,
-    MAXIMIZE_CHANGE,
-    DARK_MODE_CHANGE,
-    HISTORY,
-    LOAD_RETRY,
-    LOAD_SUCCESS,
-    LOAD_FAILED,
-    WINDOW_CLOSE,
-    WINDOW_MINIMIZE,
-    WINDOW_RESTORE,
-    WINDOW_MAXIMIZE,
-    DOUBLE_CLICK_ON_WINDOW,
-    PLAY_SOUND,
-    MODAL_OPEN,
-    MODAL_CLOSE,
-    SET_ACTIVE_VIEW,
-    UPDATE_MENTIONS,
-    TOGGLE_BACK_BUTTON,
-    FOCUS_THREE_DOT_MENU,
-    GET_FULL_SCREEN_STATUS,
-    CLOSE_TEAMS_DROPDOWN,
-    OPEN_TEAMS_DROPDOWN,
-    SWITCH_TAB,
-    CLOSE_TAB,
-} from 'common/communication';
-
-import restoreButton from '../../assets/titlebar/chrome-restore.svg';
-import maximizeButton from '../../assets/titlebar/chrome-maximize.svg';
-import minimizeButton from '../../assets/titlebar/chrome-minimize.svg';
-import closeButton from '../../assets/titlebar/chrome-close.svg';
+import BasePage, {ErrorState} from './BasePage';
+import DeveloperModeIndicator from './DeveloperModeIndicator';
+import DownloadsDropdownButton from './DownloadsDropdown/DownloadsDropdownButton';
+import ServerDropdownButton from './ServerDropdownButton';
+import TabBar from './TabBar';
 
 import {playSound} from '../notificationSounds';
-
-import TabBar from './TabBar';
-import ExtraBar from './ExtraBar';
-import ErrorView from './ErrorView';
-import TeamDropdownButton from './TeamDropdownButton';
 
 enum Status {
     LOADING = 1,
@@ -57,76 +22,74 @@ enum Status {
     RETRY = -1,
     FAILED = 0,
     NOSERVERS = -2,
+    INCOMPATIBLE = -3,
 }
 
 type Props = {
-    teams: TeamWithTabs[];
-    lastActiveTeam?: number;
-    moveTabs: (teamName: string, originalOrder: number, newOrder: number) => number | undefined;
-    openMenu: () => void;
-    darkMode: boolean;
+    openMenu: (buttonX: number) => void;
     appName: string;
-    useNativeWindow: boolean;
 };
 
 type State = {
-    activeServerName?: string;
-    activeTabName?: string;
+    activeServerId?: string;
+    activeTabId?: string;
+    servers: UniqueServer[];
+    tabs: Map<string, UniqueView[]>;
     sessionsExpired: Record<string, boolean>;
-    unreadCounts: Record<string, number>;
+    unreadCounts: Record<string, boolean>;
     mentionCounts: Record<string, number>;
-    maximized: boolean;
+    mentionsPerServer: Record<string, number>;
+    unreadsPerServer: Record<string, boolean>;
+    pendingModalsPerServer: Record<string, boolean>;
     tabViewStatus: Map<string, TabViewStatus>;
-    darkMode: boolean;
     modalOpen?: boolean;
-    fullScreen?: boolean;
-    showExtraBar?: boolean;
+    isServerModalOpen?: boolean;
     isMenuOpen: boolean;
+    isDownloadsDropdownOpen: boolean;
+    showDownloadsBadge: boolean;
+    hasDownloads: boolean;
+    developerMode: boolean;
+    primaryTabId?: string;
+    currentServer?: UniqueServer;
+    isViewLimitReached: boolean;
 };
 
 type TabViewStatus = {
     status: Status;
     extra?: {
         url: string;
-        error: string;
+        error?: string;
     };
 }
 
-export default class MainPage extends React.PureComponent<Props, State> {
-    topBar: React.RefObject<HTMLDivElement>;
-    threeDotMenu: React.RefObject<HTMLButtonElement>;
-
+class MainPage extends React.PureComponent<Props, State> {
     constructor(props: Props) {
         super(props);
 
-        this.topBar = React.createRef();
-        this.threeDotMenu = React.createRef();
-
-        const firstServer = this.props.teams.find((team) => team.order === this.props.lastActiveTeam) || this.props.teams.find((team) => team.order === 0);
-        let firstTab = firstServer?.tabs.find((tab) => tab.order === firstServer.lastActiveTab) || firstServer?.tabs.find((tab) => tab.order === 0);
-        if (!firstTab?.isOpen) {
-            const openTabs = firstServer?.tabs.filter((tab) => tab.isOpen) || [];
-            firstTab = openTabs?.find((e) => e.order === 0) || openTabs[0];
-        }
-
         this.state = {
-            activeServerName: firstServer?.name,
-            activeTabName: firstTab?.name,
+            servers: [],
+            tabs: new Map(),
             sessionsExpired: {},
             unreadCounts: {},
             mentionCounts: {},
-            maximized: false,
-            tabViewStatus: new Map(this.props.teams.map((team) => team.tabs.map((tab) => getTabViewName(team.name, tab.name))).flat().map((tabViewName) => [tabViewName, {status: Status.LOADING}])),
-            darkMode: this.props.darkMode,
+            mentionsPerServer: {},
+            unreadsPerServer: {},
+            pendingModalsPerServer: {},
+            tabViewStatus: new Map(),
             isMenuOpen: false,
+            isDownloadsDropdownOpen: false,
+            showDownloadsBadge: false,
+            hasDownloads: false,
+            developerMode: false,
+            isViewLimitReached: false,
         };
     }
 
     getTabViewStatus() {
-        if (!this.state.activeServerName || !this.state.activeTabName) {
+        if (!this.state.activeTabId) {
             return undefined;
         }
-        return this.state.tabViewStatus.get(getTabViewName(this.state.activeServerName, this.state.activeTabName)) ?? {status: Status.NOSERVERS};
+        return this.state.tabViewStatus.get(this.state.activeTabId) ?? {status: Status.NOSERVERS};
     }
 
     updateTabStatus(tabViewName: string, newStatusValue: TabViewStatus) {
@@ -135,10 +98,119 @@ export default class MainPage extends React.PureComponent<Props, State> {
         this.setState({tabViewStatus: status});
     }
 
-    componentDidMount() {
+    async requestDownloadsLength() {
+        try {
+            const hasDownloads = await window.desktop.requestHasDownloads();
+            this.setState({
+                hasDownloads,
+            });
+        } catch (error) {
+            console.error(error);
+        }
+    }
+
+    getServersAndTabs = async () => {
+        const servers = await window.desktop.getOrderedServers();
+        const tabs = new Map();
+        const tabViewStatus = new Map(this.state.tabViewStatus);
+        await Promise.all(
+            servers.map((srv) => window.desktop.getOrderedTabsForServer(srv.id!).
+                then((tabs) => ({id: srv.id, tabs}))),
+        ).then((serverTabs) => {
+            serverTabs.forEach((serverTab) => {
+                tabs.set(serverTab.id, serverTab.tabs);
+                serverTab.tabs.forEach((tab) => {
+                    if (!tabViewStatus.has(tab.id!)) {
+                        tabViewStatus.set(tab.id!, {status: Status.LOADING});
+                    }
+                });
+            });
+        });
+        this.setState({servers, tabs, tabViewStatus, currentServer: servers.find((srv) => srv.id === this.state.activeServerId)});
+        return Boolean(servers.length);
+    };
+
+    setInitialActiveTab = async () => {
+        const currentServer = await window.desktop.getCurrentServer();
+        if (!currentServer?.id) {
+            return;
+        }
+        const view = await window.desktop.getActiveTabForServer(currentServer.id);
+        if (view) {
+            this.setState({
+                currentServer,
+                activeServerId: currentServer.id,
+                activeTabId: view.id,
+            });
+        }
+    };
+
+    updateServers = async () => {
+        const hasServers = await this.getServersAndTabs();
+        if (hasServers && !(this.state.activeServerId && this.state.activeTabId)) {
+            await this.setInitialActiveTab();
+        }
+    };
+
+    updateIsViewLimitReached = async () => {
+        const isViewLimitReached = await window.desktop.getIsViewLimitReached();
+        this.setState({isViewLimitReached});
+    };
+
+    handleServerAdded = async (serverId: string, setAsCurrentServer: boolean) => {
+        // Refresh servers and tabs when a server is added
+        await this.updateServers();
+        if (setAsCurrentServer) {
+            await this.setInitialActiveTab();
+        }
+    };
+
+    handleServerSwitched = async () => {
+        const currentServer = await window.desktop.getCurrentServer();
+        if (currentServer?.id) {
+            this.setState({
+                currentServer,
+                activeServerId: currentServer.id,
+            });
+        }
+    };
+
+    async componentDidMount() {
+        // request downloads
+        await this.requestDownloadsLength();
+        await this.updateServers();
+        await this.updateIsViewLimitReached();
+
+        window.desktop.onServerAdded(this.handleServerAdded);
+        window.desktop.onServerRemoved(this.updateServers);
+        window.desktop.onServerUrlChanged(this.updateServers);
+        window.desktop.onServerNameChanged(this.updateServers);
+        window.desktop.onServerSwitched(this.handleServerSwitched);
+        window.desktop.onServerLoggedInChanged(this.updateServers);
+        window.desktop.onTabAdded(this.updateServers);
+        window.desktop.onTabRemoved(this.updateServers);
+        window.desktop.onTabOrderUpdated(this.updateServers);
+        window.desktop.onViewLimitUpdated(this.updateIsViewLimitReached);
+
+        // Add tab title update handler
+        window.desktop.onUpdateTabTitle((viewId, title) => {
+            const tabs = new Map(this.state.tabs);
+            for (const [serverId, serverTabs] of tabs.entries()) {
+                const tab = serverTabs.find((t) => t.id === viewId);
+                if (tab) {
+                    const updatedTabs = serverTabs.map((t) =>
+                        (t.id === viewId ? {...t, ...title} : t),
+                    );
+                    tabs.set(serverId, updatedTabs);
+                    this.setState({tabs});
+                    break;
+                }
+            }
+        });
+
         // set page on retry
-        window.ipcRenderer.on(LOAD_RETRY, (_, viewName, retry, err, loadUrl) => {
-            console.log(`${viewName}: failed to load ${err}, but retrying`);
+        window.desktop.onLoadRetry((viewId, retry, err, loadUrl) => {
+            console.error(`${viewId}: failed to load ${err}, but retrying`);
             const statusValue = {
                 status: Status.RETRY,
                 extra: {
@@ -147,15 +219,15 @@ export default class MainPage extends React.PureComponent<Props, State> {
                     url: loadUrl,
                 },
             };
-            this.updateTabStatus(viewName, statusValue);
+            this.updateTabStatus(viewId, statusValue);
         });
 
-        window.ipcRenderer.on(LOAD_SUCCESS, (_, viewName) => {
-            this.updateTabStatus(viewName, {status: Status.DONE});
+        window.desktop.onLoadSuccess((viewId) => {
+            this.updateTabStatus(viewId, {status: Status.DONE});
         });
 
-        window.ipcRenderer.on(LOAD_FAILED, (_, viewName, err, loadUrl) => {
-            console.log(`${viewName}: failed to load ${err}`);
+        window.desktop.onLoadFailed((viewId, err, loadUrl) => {
+            console.error(`${viewId}: failed to load ${err}`);
             const statusValue = {
                 status: Status.FAILED,
                 extra: {
@@ -163,42 +235,36 @@ export default class MainPage extends React.PureComponent<Props, State> {
                     url: loadUrl,
                 },
             };
-            this.updateTabStatus(viewName, statusValue);
+            this.updateTabStatus(viewId, statusValue);
         });
 
-        window.ipcRenderer.on(DARK_MODE_CHANGE, (_, darkMode) => {
-            this.setState({darkMode});
+        window.desktop.onLoadIncompatibleServer((viewId, loadUrl) => {
+            console.error(`${viewId}: tried to load incompatible server`);
+            const statusValue = {
+                status: Status.INCOMPATIBLE,
+                extra: {
+                    url: loadUrl,
+                },
+            };
+            this.updateTabStatus(viewId, statusValue);
         });
 
         // can't switch tabs sequentially for some reason...
-        window.ipcRenderer.on(SET_ACTIVE_VIEW, (event, serverName, tabName) => {
-            this.setState({activeServerName: serverName, activeTabName: tabName});
-        });
+        window.desktop.onSetActiveView(this.setActiveView);
 
-        window.ipcRenderer.on(MAXIMIZE_CHANGE, this.handleMaximizeState);
-
-        window.ipcRenderer.on('enter-full-screen', () => this.handleFullScreenState(true));
-        window.ipcRenderer.on('leave-full-screen', () => this.handleFullScreenState(false));
-
-        window.ipcRenderer.invoke(GET_FULL_SCREEN_STATUS).then((fullScreenStatus) => this.handleFullScreenState(fullScreenStatus));
-
-        window.ipcRenderer.on(PLAY_SOUND, (_event, soundName) => {
+        window.desktop.onPlaySound((soundName) => {
             playSound(soundName);
         });
 
-        window.ipcRenderer.on(MODAL_OPEN, () => {
-            this.setState({modalOpen: true});
+        window.desktop.onModalOpen((isServerModal) => {
+            this.setState({modalOpen: true, isServerModalOpen: isServerModal});
         });
 
-        window.ipcRenderer.on(MODAL_CLOSE, () => {
-            this.setState({modalOpen: false});
+        window.desktop.onModalClose(() => {
+            this.setState({modalOpen: false, isServerModalOpen: false});
         });
 
-        window.ipcRenderer.on(TOGGLE_BACK_BUTTON, (event, showExtraBar) => {
-            this.setState({showExtraBar});
-        });
-
-        window.ipcRenderer.on(UPDATE_MENTIONS, (_event, view, mentions, unreads, isExpired) => {
+        window.desktop.onUpdateMentions((view, mentions, unreads, isExpired) => {
             const {unreadCounts, mentionCounts, sessionsExpired} = this.state;
 
             const newMentionCounts = {...mentionCounts};
@@ -213,48 +279,113 @@ export default class MainPage extends React.PureComponent<Props, State> {
             this.setState({unreadCounts: newUnreads, mentionCounts: newMentionCounts, sessionsExpired: expired});
         });
 
-        window.ipcRenderer.on(CLOSE_TEAMS_DROPDOWN, () => {
+        window.desktop.onUpdateMentionsForServer((serverId, _, mentions, unreads, hasPendingModal) => {
+            const {mentionsPerServer, unreadsPerServer, pendingModalsPerServer} = this.state;
+
+            const newMentionsPerServer = {...mentionsPerServer};
+            if (mentions) {
+                newMentionsPerServer[serverId] = mentions;
+            } else {
+                delete newMentionsPerServer[serverId];
+            }
+
+            const newUnreadsPerServer = {...unreadsPerServer};
+            if (unreads) {
+                newUnreadsPerServer[serverId] = unreads;
+            } else {
+                delete newUnreadsPerServer[serverId];
+            }
+
+            const newPendingModalsPerServer = {...pendingModalsPerServer};
+            if (hasPendingModal) {
+                newPendingModalsPerServer[serverId] = hasPendingModal;
+            } else {
+                delete newPendingModalsPerServer[serverId];
+            }
+
+            this.setState({mentionsPerServer: newMentionsPerServer, unreadsPerServer: newUnreadsPerServer, pendingModalsPerServer: newPendingModalsPerServer});
+        });
+
+        window.desktop.onCloseServersDropdown(() => {
             this.setState({isMenuOpen: false});
         });
 
-        window.ipcRenderer.on(OPEN_TEAMS_DROPDOWN, () => {
+        window.desktop.onOpenServersDropdown(() => {
             this.setState({isMenuOpen: true});
         });
 
-        if (window.process.platform !== 'darwin') {
-            window.ipcRenderer.on(FOCUS_THREE_DOT_MENU, () => {
-                if (this.threeDotMenu.current) {
-                    this.threeDotMenu.current.focus();
-                }
-            });
-        }
+        window.desktop.onCloseDownloadsDropdown(() => {
+            this.setState({isDownloadsDropdownOpen: false});
+        });
 
-        window.addEventListener('click', this.handleCloseTeamsDropdown);
+        window.desktop.onOpenDownloadsDropdown(() => {
+            this.setState({isDownloadsDropdownOpen: true});
+        });
+
+        window.desktop.onShowDownloadsDropdownButtonBadge(() => {
+            this.setState({showDownloadsBadge: true});
+        });
+
+        window.desktop.onHideDownloadsDropdownButtonBadge(() => {
+            this.setState({showDownloadsBadge: false});
+        });
+
+        window.desktop.onUpdateDownloadsDropdown((downloads: DownloadedItems) => {
+            this.setState({
+                hasDownloads: (Object.values(downloads)?.length || 0) > 0,
+            });
+        });
+
+        window.addEventListener('click', this.handleCloseDropdowns);
+
+        window.desktop.isDeveloperModeEnabled().then((developerMode) => {
+            this.setState({developerMode});
+        });
     }
 
     componentWillUnmount() {
-        window.removeEventListener('click', this.handleCloseTeamsDropdown);
+        window.removeEventListener('click', this.handleCloseDropdowns);
     }
 
-    handleCloseTeamsDropdown = () => {
-        window.ipcRenderer.send(CLOSE_TEAMS_DROPDOWN);
-    }
+    setActiveView = async (serverId: string, tabId: string) => {
+        await this.updateServers();
+        if (serverId === this.state.activeServerId && tabId === this.state.activeTabId) {
+            return;
+        }
 
-    handleMaximizeState = (_: IpcRendererEvent, maximized: boolean) => {
-        this.setState({maximized});
-    }
+        // Find the current server
+        const currentServer = this.state.servers.find((srv) => srv.id === serverId);
+        if (!currentServer) {
+            return;
+        }
 
-    handleFullScreenState = (isFullScreen: boolean) => {
-        this.setState({fullScreen: isFullScreen});
-    }
+        // Find the tab in the current server's tabs
+        const serverTabs = this.state.tabs.get(serverId) || [];
+        const tab = serverTabs.find((t) => t.id === tabId);
+        if (!tab) {
+            return;
+        }
 
-    handleSelectTab = (name: string) => {
-        window.ipcRenderer.send(SWITCH_TAB, this.state.activeServerName, name);
-    }
+        this.setState({
+            activeServerId: serverId,
+            activeTabId: tabId,
+            currentServer,
+        });
+    };
 
-    handleCloseTab = (name: string) => {
-        window.ipcRenderer.send(CLOSE_TAB, this.state.activeServerName, name);
-    }
+    handleCloseDropdowns = () => {
+        window.desktop.closeServersDropdown();
+        this.closeDownloadsDropdown();
+    };
+
+    handleSelectTab = (tabId: string) => {
+        window.desktop.switchTab(tabId);
+    };
+
+    handleCloseTab = async (viewId: string) => {
+        await window.desktop.closeTab(viewId);
+        await this.updateServers();
+    };
 
     handleDragAndDrop = async (dropResult: DropResult) => {
         const removedIndex = dropResult.source.index;
@@ -262,249 +393,153 @@ export default class MainPage extends React.PureComponent<Props, State> {
         if (addedIndex === undefined || removedIndex === addedIndex) {
             return;
         }
-        if (!this.state.activeServerName) {
-            return;
-        }
-        const currentTabs = this.props.teams.find((team) => team.name === this.state.activeServerName)?.tabs;
-        if (!currentTabs) {
+        if (!(this.state.activeServerId && this.state.tabs.has(this.state.activeServerId))) {
             // TODO: figure out something here
             return;
         }
-        const teamIndex = this.props.moveTabs(this.state.activeServerName, removedIndex, addedIndex < currentTabs.length ? addedIndex : currentTabs.length - 1);
-        if (!teamIndex) {
+        const currentTabs = this.state.tabs.get(this.state.activeServerId)!;
+        const tabsCopy = currentTabs.concat();
+
+        const tab = tabsCopy.splice(removedIndex, 1);
+        const newOrder = addedIndex < currentTabs.length ? addedIndex : currentTabs.length - 1;
+        tabsCopy.splice(newOrder, 0, tab[0]);
+
+        window.desktop.updateTabOrder(this.state.activeServerId, tabsCopy.map((tab) => tab.id!));
+        const tabs = new Map(this.state.tabs);
+        tabs.set(this.state.activeServerId, tabsCopy);
+        this.setState({tabs});
+        this.handleSelectTab(tab[0].id!);
+    };
+
+    showHideDownloadsBadge(value = false) {
+        this.setState({showDownloadsBadge: value});
+    }
+
+    closeDownloadsDropdown() {
+        window.desktop.closeDownloadsDropdown();
+        window.desktop.closeDownloadsDropdownMenu();
+    }
+
+    openDownloadsDropdown() {
+        window.desktop.openDownloadsDropdown();
+    }
+
+    openServerExternally = () => {
+        window.desktop.openServerExternally();
+    };
+
+    handleNewTab = async () => {
+        const {currentServer} = this.state;
+        if (!currentServer?.id) {
             return;
         }
-        const name = currentTabs[teamIndex].name;
-        this.handleSelectTab(name);
-    }
 
-    handleClose = (e: React.MouseEvent<HTMLDivElement>) => {
-        e.stopPropagation(); // since it is our button, the event goes into MainPage's onclick event, getting focus back.
-        window.ipcRenderer.send(WINDOW_CLOSE);
-    }
-
-    handleMinimize = (e: React.MouseEvent<HTMLDivElement>) => {
-        e.stopPropagation();
-        window.ipcRenderer.send(WINDOW_MINIMIZE);
-    }
-
-    handleMaximize = (e: React.MouseEvent<HTMLDivElement>) => {
-        e.stopPropagation();
-        window.ipcRenderer.send(WINDOW_MAXIMIZE);
-    }
-
-    handleRestore = () => {
-        window.ipcRenderer.send(WINDOW_RESTORE);
-    }
-
-    openMenu = () => {
-        if (window.process.platform !== 'darwin') {
-            this.threeDotMenu.current?.blur();
+        const newTabId = await window.desktop.createNewTab(currentServer.id);
+        await this.updateServers();
+        if (newTabId) {
+            await window.desktop.switchTab(newTabId);
         }
-        this.props.openMenu();
-    }
+    };
 
-    handleDoubleClick = () => {
-        window.ipcRenderer.send(DOUBLE_CLICK_ON_WINDOW);
-    }
-
-    focusOnWebView = () => {
-        window.ipcRenderer.send(FOCUS_BROWSERVIEW);
-        this.handleCloseTeamsDropdown();
-    }
+    handleOpenPopoutMenu = (viewId: string) => {
+        window.desktop.openPopoutMenu(viewId);
+    };
 
     render() {
-        const currentTabs = this.props.teams.find((team) => team.name === this.state.activeServerName)?.tabs || [];
+        let currentTabs: UniqueView[] = [];
+        if (this.state.activeServerId) {
+            currentTabs = this.state.tabs.get(this.state.activeServerId) ?? [];
+        }
 
         const tabsRow = (
             <TabBar
                 id='tabBar'
-                isDarkMode={this.state.darkMode}
                 tabs={currentTabs}
                 sessionsExpired={this.state.sessionsExpired}
                 unreadCounts={this.state.unreadCounts}
                 mentionCounts={this.state.mentionCounts}
-                activeServerName={this.state.activeServerName}
-                activeTabName={this.state.activeTabName}
+                activeServerId={this.state.activeServerId}
+                activeTabId={this.state.activeTabId}
                 onSelect={this.handleSelectTab}
                 onCloseTab={this.handleCloseTab}
+                onOpenPopoutMenu={this.handleOpenPopoutMenu}
+                onNewTab={this.handleNewTab}
                 onDrop={this.handleDragAndDrop}
-                tabsDisabled={this.state.modalOpen}
-                isMenuOpen={this.state.isMenuOpen}
+                tabsDisabled={this.state.modalOpen || !this.state.currentServer?.isLoggedIn}
+                isMenuOpen={this.state.isMenuOpen || this.state.isDownloadsDropdownOpen}
+                isViewLimitReached={this.state.isViewLimitReached}
             />
         );
 
-        let topBarClassName = 'topBar';
-        if (window.process.platform === 'darwin') {
-            topBarClassName += ' macOS';
-        }
-        if (this.state.darkMode) {
-            topBarClassName += ' darkMode';
-        }
-        if (this.state.fullScreen) {
-            topBarClassName += ' fullScreen';
-        }
+        const downloadsDropdownButton = this.state.hasDownloads ? (
+            <DownloadsDropdownButton
+                isDownloadsDropdownOpen={this.state.isDownloadsDropdownOpen}
+                showDownloadsBadge={this.state.showDownloadsBadge}
+                closeDownloadsDropdown={this.closeDownloadsDropdown}
+                openDownloadsDropdown={this.openDownloadsDropdown}
+            />
+        ) : null;
 
-        let maxButton;
-        if (this.state.maximized || this.state.fullScreen) {
-            maxButton = (
-                <div
-                    className='button restore-button'
-                    onClick={this.handleRestore}
-                >
-                    <img src={restoreButton}/>
-                </div>
-            );
-        } else {
-            maxButton = (
-                <div
-                    className='button max-button'
-                    onClick={this.handleMaximize}
-                >
-                    <img src={maximizeButton}/>
-                </div>
-            );
-        }
-
-        let overlayGradient;
-        if (window.process.platform !== 'darwin') {
-            overlayGradient = (
-                <span className='overlay-gradient'/>
-            );
-        }
-
-        let titleBarButtons;
-        if (window.process.platform === 'win32' && !this.props.useNativeWindow) {
-            titleBarButtons = (
-                <span className='title-bar-btns'>
-                    <div
-                        className='button min-button'
-                        onClick={this.handleMinimize}
-                    >
-                        <img src={minimizeButton}/>
-                    </div>
-                    {maxButton}
-                    <div
-                        className='button close-button'
-                        onClick={this.handleClose}
-                    >
-                        <img src={closeButton}/>
-                    </div>
-                </span>
-            );
-        }
-
-        const serverMatch = `${this.state.activeServerName}___TAB_[A-Z]+`;
-        const totalMentionCount = Object.keys(this.state.mentionCounts).reduce((sum, key) => {
+        const totalMentionCount = Object.keys(this.state.mentionsPerServer).reduce((sum, key) => {
             // Strip out current server from unread and mention counts
-            if (this.state.activeServerName && key.match(serverMatch)) {
+            if (key === this.state.activeServerId) {
                 return sum;
             }
-            return sum + this.state.mentionCounts[key];
+            return sum + this.state.mentionsPerServer[key];
         }, 0);
-        const totalUnreadCount = Object.keys(this.state.unreadCounts).reduce((sum, key) => {
-            if (this.state.activeServerName && key.match(serverMatch)) {
+        const hasAnyUnreads = Object.keys(this.state.unreadsPerServer).reduce((sum, key) => {
+            if (key === this.state.activeServerId) {
                 return sum;
             }
-            return sum + this.state.unreadCounts[key];
-        }, 0);
-        const topRow = (
-            <Row
-                className={topBarClassName}
-                onDoubleClick={this.handleDoubleClick}
-            >
-                <div
-                    ref={this.topBar}
-                    className={'topBar-bg'}
-                >
-                    <button
-                        className='three-dot-menu'
-                        onClick={this.openMenu}
-                        tabIndex={0}
-                        ref={this.threeDotMenu}
-                        aria-label='Context menu'
-                    >
-                        <DotsVerticalIcon/>
-                    </button>
-                    <TeamDropdownButton
-                        isDisabled={this.state.modalOpen}
-                        activeServerName={this.state.activeServerName}
-                        totalMentionCount={totalMentionCount}
-                        hasUnreads={totalUnreadCount > 0}
-                        isMenuOpen={this.state.isMenuOpen}
-                        darkMode={this.state.darkMode}
-                    />
-                    {tabsRow}
-                    {overlayGradient}
-                    {titleBarButtons}
-                </div>
-            </Row>
-        );
+            return sum || this.state.unreadsPerServer[key];
+        }, false);
+        const hasPendingModals = Object.keys(this.state.pendingModalsPerServer).some((key) => key !== this.state.activeServerId);
 
-        const views = () => {
-            let component;
-            const tabStatus = this.getTabViewStatus();
-            if (!tabStatus) {
-                if (this.state.activeTabName) {
-                    console.error(`Not tabStatus for ${this.state.activeTabName}`);
-                } else {
-                    console.error('No tab status, tab doesn\'t exist anymore');
-                }
-                return null;
+        const activeServer = this.state.servers.find((srv) => srv.id === this.state.activeServerId);
+        const tabStatus = activeServer && this.getTabViewStatus();
+        if (!tabStatus) {
+            if (this.state.activeTabId) {
+                console.error(`Not tabStatus for ${this.state.activeTabId}`);
             }
-            switch (tabStatus.status) {
-            case Status.NOSERVERS: // TODO: substitute with https://mattermost.atlassian.net/browse/MM-25003
-                component = (
-                    <ErrorView
-                        id={'NoServers'}
-                        errorInfo={'No Servers configured'}
-                        url={tabStatus.extra ? tabStatus.extra.url : ''}
-                        active={true}
-                        appName={this.props.appName}
-                    />);
-                break;
-            case Status.FAILED:
-                component = (
-                    <ErrorView
-                        id={this.state.activeTabName + '-fail'}
-                        errorInfo={tabStatus.extra?.error}
-                        url={tabStatus.extra ? tabStatus.extra.url : ''}
-                        active={true}
-                        appName={this.props.appName}
-                    />);
-                break;
-            case Status.LOADING:
-            case Status.RETRY:
-            case Status.DONE:
-                component = null;
-            }
-            return component;
-        };
-
-        const viewsRow = (
-            <Fragment>
-                <ExtraBar
-                    darkMode={this.state.darkMode}
-                    show={this.state.showExtraBar}
-                    goBack={() => {
-                        window.ipcRenderer.send(HISTORY, -1);
-                    }}
-                />
-                <Row>
-                    {views()}
-                </Row>
-            </Fragment>);
+        }
+        let errorState: ErrorState | undefined;
+        if (tabStatus?.status === Status.FAILED) {
+            errorState = ErrorState.FAILED;
+        } else if (tabStatus?.status === Status.INCOMPATIBLE) {
+            errorState = ErrorState.INCOMPATIBLE;
+        }
 
         return (
-            <div
-                className='MainPage'
-                onClick={this.focusOnWebView}
+            <BasePage
+                appName={this.props.appName}
+                openMenu={this.props.openMenu}
+                title={window.process.platform !== 'linux' && this.state.servers.length === 0 ? this.props.appName : undefined}
+                errorState={errorState}
+                errorMessage={tabStatus?.extra?.error}
+                errorUrl={tabStatus?.extra?.url}
             >
-                <Container fluid={true}>
-                    {topRow}
-                    {viewsRow}
-                </Container>
-            </div>
+                {activeServer && (
+                    <>
+                        <ServerDropdownButton
+                            isDisabled={this.state.modalOpen && !this.state.isServerModalOpen}
+                            activeServerName={activeServer.name}
+                            totalMentionCount={totalMentionCount}
+                            currentMentions={this.state.mentionsPerServer[this.state.activeServerId!] ?? 0}
+                            currentUnread={this.state.unreadsPerServer[this.state.activeServerId!] ?? false}
+                            hasUnreads={hasAnyUnreads}
+                            hasPendingModals={hasPendingModals}
+                            isMenuOpen={this.state.isMenuOpen}
+                        />
+                    </>
+                )}
+                {tabsRow}
+                <DeveloperModeIndicator
+                    developerMode={this.state.developerMode}
+                />
+                {downloadsDropdownButton}
+            </BasePage>
         );
     }
 }
+
+export default MainPage;

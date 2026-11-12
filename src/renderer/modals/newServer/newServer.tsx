@@ -1,61 +1,52 @@
 // Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import 'bootstrap/dist/css/bootstrap.min.css';
-import 'renderer/css/modals.css';
-
 import React, {useEffect, useState} from 'react';
 import ReactDOM from 'react-dom';
 
-import {TeamWithIndex} from 'types/config';
-import {ModalMessage} from 'types/modals';
+import IntlProvider from 'renderer/intl_provider';
 
-import {GET_MODAL_UNCLOSEABLE, MODAL_CANCEL, MODAL_RESULT, MODAL_UNCLOSEABLE} from 'common/communication';
+import type {UniqueServer} from 'types/config';
 
-import NewTeamModal from '../../components/NewTeamModal'; //'./addServer.jsx';
-
+import NewServerModal from '../../components/NewServerModal';
 import setupDarkMode from '../darkMode';
 
 setupDarkMode();
 
 const onClose = () => {
-    window.postMessage({type: MODAL_CANCEL}, window.location.href);
+    window.desktop.modals.cancelModal();
 };
 
-const onSave = (data: TeamWithIndex) => {
-    window.postMessage({type: MODAL_RESULT, data}, window.location.href);
+const onSave = (data: UniqueServer) => {
+    window.desktop.modals.finishModal(data);
 };
 
 const NewServerModalWrapper: React.FC = () => {
+    const [data, setData] = useState<{prefillURL?: string}>();
     const [unremoveable, setUnremovable] = useState<boolean>();
 
-    const handleNewServerMessage = (event: {data: ModalMessage<boolean>}) => {
-        switch (event.data.type) {
-        case MODAL_UNCLOSEABLE: {
-            setUnremovable(event.data.data);
-            break;
-        }
-        default:
-            break;
-        }
-    };
-
     useEffect(() => {
-        window.addEventListener('message', handleNewServerMessage);
-        window.postMessage({type: GET_MODAL_UNCLOSEABLE}, window.location.href);
+        window.desktop.modals.isModalUncloseable().then((uncloseable) => {
+            setUnremovable(uncloseable);
+        });
 
-        return () => {
-            window.removeEventListener('message', handleNewServerMessage);
-        };
+        window.desktop.modals.getModalInfo<{prefillURL?: string}>().
+            then((data) => {
+                setData(data);
+            });
     }, []);
 
     return (
-        <NewTeamModal
-            onClose={unremoveable ? undefined : onClose}
-            onSave={onSave}
-            editMode={false}
-            show={true}
-        />
+        <IntlProvider>
+            <NewServerModal
+                unremoveable={unremoveable}
+                onClose={onClose}
+                onSave={onSave}
+                editMode={false}
+                prefillURL={data?.prefillURL}
+                show={true}
+            />
+        </IntlProvider>
     );
 };
 

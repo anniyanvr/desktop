@@ -1,15 +1,13 @@
 // Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {throttle} from 'underscore';
-
-import ding from 'static/sounds/ding.mp3';
-import bing from 'static/sounds/bing.mp3';
-import crackle from 'static/sounds/crackle.mp3';
-import down from 'static/sounds/down.mp3';
-import hello from 'static/sounds/hello.mp3';
-import ripple from 'static/sounds/ripple.mp3';
-import upstairs from 'static/sounds/upstairs.mp3';
+import bing from 'assets/sounds/bing.mp3';
+import crackle from 'assets/sounds/crackle.mp3';
+import ding from 'assets/sounds/ding.mp3';
+import down from 'assets/sounds/down.mp3';
+import hello from 'assets/sounds/hello.mp3';
+import ripple from 'assets/sounds/ripple.mp3';
+import upstairs from 'assets/sounds/upstairs.mp3';
 
 const DEFAULT_WIN7 = 'Ding';
 const notificationSounds = new Map([
@@ -22,9 +20,15 @@ const notificationSounds = new Map([
     ['Upstairs', upstairs],
 ]);
 
-export const playSound = throttle((soundName: string) => {
-    if (soundName) {
+let canPlaySound = true;
+
+export const playSound = (soundName: string) => {
+    if (soundName && canPlaySound) {
+        canPlaySound = false;
+        setTimeout(() => {
+            canPlaySound = true;
+        }, 3000);
         const audio = new Audio(notificationSounds.get(soundName));
         audio.play();
     }
-}, 3000, {trailing: false});
+};

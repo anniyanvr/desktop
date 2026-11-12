@@ -1,34 +1,48 @@
 // Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-export type Tab = {
+export type Server = {
     name: string;
-    order: number;
-    isOpen?: boolean;
-}
-
-export type Team = {
-    name: string;
-    order: number;
     url: string;
-    lastActiveTab?: number;
 }
 
-export type TeamWithIndex = Team & {index: number};
-export type TeamWithTabs = Team & {tabs: Tab[]};
+export type TrustedEmbeddedMediaOrigin = {
+    serverOrigin: string;
+    embeddedOrigin: string;
+}
 
-export type Config = ConfigV3;
+export type ConfigServer = Server & {
+    order: number;
+    isPredefined?: boolean;
+}
 
-export type ConfigV3 = {
-    version: 3;
-    teams: TeamWithTabs[];
+export type UniqueServer = Server & {
+    id?: string;
+    isPredefined?: boolean;
+    isLoggedIn?: boolean;
+}
+
+export type UniqueView = {
+    id: string;
+    serverId: string;
+    channelName?: string;
+    teamName?: string;
+    serverName: string;
+    isDisabled?: boolean;
+}
+
+export type CurrentConfig = ConfigV4;
+
+export type ConfigV4 = {
+    version: 4;
+    servers: ConfigServer[];
     showTrayIcon: boolean;
     trayIconTheme: string;
     minimizeToTray: boolean;
     notifications: {
         flashWindow: number;
         bounceIcon: boolean;
-        bounceIconType: 'critical' | 'informational';
+        bounceIconType: '' | 'critical' | 'informational';
     };
     showUnreadBadge: boolean;
     useSpellChecker: boolean;
@@ -37,88 +51,119 @@ export type ConfigV3 = {
     hideOnStart: boolean;
     spellCheckerLocales: string[];
     darkMode: boolean;
-    downloadLocation: string;
+    downloadLocation?: string;
     spellCheckerURL?: string;
+    lastActiveServer?: number;
+    startInFullscreen?: boolean;
+    autoCheckForUpdates?: boolean;
+    alwaysMinimize?: boolean;
+    alwaysClose?: boolean;
+    logLevel?: string;
+    appLanguage?: string;
+    enableMetrics?: boolean;
+    enableSentry?: boolean;
+    enableSessionAttributes?: boolean;
+    viewLimit?: number;
+    themeSyncing?: boolean;
+    skippedVersions?: string[];
+    useNativeTitleBar?: boolean;
+    trustedEmbeddedMediaOrigins?: TrustedEmbeddedMediaOrigin[];
+}
+
+export type ConfigV3 = Omit<ConfigV4,
+'version' |
+'servers' |
+'viewLimit' |
+'lastActiveServer'> & {
+    version: 3;
+    teams: Array<Server & {
+        order: number;
+        lastActiveTab?: number;
+        tabs: Array<{
+            name: string;
+            isOpen?: boolean;
+            order: number;
+        }>;
+    }>;
     lastActiveTeam?: number;
 }
 
-export type ConfigV2 = {
-    version: 2;
-    teams: Array<{
-        name: string;
-        url: string;
-        order: number;
-    }>;
-    showTrayIcon: boolean;
-    trayIconTheme: string;
-    minimizeToTray: boolean;
-    notifications: {
-        flashWindow: number;
-        bounceIcon: boolean;
-        bounceIconType: 'critical' | 'informational';
-    };
-    showUnreadBadge: boolean;
-    useSpellChecker: boolean;
-    enableHardwareAcceleration: boolean;
-    autostart: boolean;
-    spellCheckerLocale: string;
-    spellCheckerURL?: string;
-    darkMode: boolean;
-    downloadLocation: string;
-}
+export type ConfigV2 =
+    Omit<ConfigV3,
+    'version' |
+    'teams' |
+    'lastActiveTeam' |
+    'hideOnStart' |
+    'spellCheckerLocales' |
+    'startInFullscreen' |
+    'autoCheckForUpdates' |
+    'alwaysMinimize' |
+    'alwaysClose' |
+    'logLevel' |
+    'appLanguage'
+    > & {
+        version: 2;
+        teams: Array<{
+            name: string;
+            url: string;
+            order: number;
+        }>;
+        spellCheckerLocale: string;
+    }
 
-export type ConfigV1 = {
-    version: 1;
-    teams: Array<{
-        name: string;
-        url: string;
-    }>;
-    showTrayIcon: boolean;
-    trayIconTheme: string;
-    minimizeToTray: boolean;
-    notifications: {
-        flashWindow: number;
-        bounceIcon: boolean;
-        bounceIconType: 'critical' | 'informational';
-    };
-    showUnreadBadge: boolean;
-    useSpellChecker: boolean;
-    spellCheckerURL?: string;
-    enableHardwareAcceleration: boolean;
-    autostart: boolean;
-    spellCheckerLocale: string;
-}
+export type ConfigV1 =
+    Omit<ConfigV2,
+    'version' |
+    'teams' |
+    'darkMode' |
+    'downloadLocation'
+    > & {
+        version: 1;
+        teams: Array<{
+            name: string;
+            url: string;
+        }>;
+    }
 
 export type ConfigV0 = {version: 0; url: string};
 
-export type AnyConfig = ConfigV3 | ConfigV2 | ConfigV1 | ConfigV0;
+export type AnyConfig = ConfigV4 | ConfigV3 | ConfigV2 | ConfigV1 | ConfigV0;
 
 export type BuildConfig = {
-    defaultTeams?: Team[];
+    defaultServers?: Server[];
     helpLink: string;
+    academyLink: string;
+    upgradeLink: string;
     enableServerManagement: boolean;
-    enableAutoUpdater: boolean;
+    enableUpdateNotifications: boolean;
+    updateNotificationURL: string;
+    macAppStoreUpdateURL: string;
+    windowsStoreUpdateURL?: string;
+    linuxUpdateURL: string;
+    linuxGitHubReleaseURL: string;
     managedResources: string[];
+    allowedProtocols: string[];
+    trustedEmbeddedMediaOrigins?: TrustedEmbeddedMediaOrigin[];
 }
 
 export type RegistryConfig = {
-    teams: Team[];
+    servers: Server[];
     enableServerManagement: boolean;
-    enableAutoUpdater: boolean;
+    enableUpdateNotifications: boolean;
+    trustedEmbeddedMediaOrigins: TrustedEmbeddedMediaOrigin[];
 }
 
-export type CombinedConfig = ConfigV3 & BuildConfig & {
-    registryTeams: Team[];
+export type CombinedConfig = Omit<CurrentConfig, 'servers'> & Omit<BuildConfig, 'defaultServers'> & {
     appName: string;
-    useNativeWindow: boolean;
-
 }
 
-export type LocalConfiguration = Config & {
+export type LocalConfiguration = CurrentConfig & {
     appName: string;
     enableServerManagement: boolean;
+    canUpgrade: boolean;
 }
 
 export type MigrationInfo = {
     updateTrayIconWin32: boolean;
+    enableMetrics: boolean;
 }

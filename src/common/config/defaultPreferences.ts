@@ -2,28 +2,41 @@
 // Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import path from 'path';
 import os from 'os';
+import path from 'path';
+
+import {app} from 'electron';
 
 /**
  * Default user preferences. End-users can change these parameters by editing config.json
  * @param {number} version - Scheme version. (Not application version)
  */
 
-import {ConfigV3} from 'types/config';
+import type {ConfigV4} from 'types/config';
 
-export const getDefaultDownloadLocation = (): string => {
-    return path.join(os.homedir(), 'Downloads');
+export const getDefaultDownloadLocation = (): string | undefined => {
+    // eslint-disable-next-line no-undef
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
+    if (__IS_MAC_APP_STORE__) {
+        return undefined;
+    }
+
+    if (process.platform === 'linux' && process.env.XDG_DOWNLOAD_DIR) {
+        return process.env.XDG_DOWNLOAD_DIR;
+    }
+
+    return app.getPath('downloads') || path.join(os.homedir(), 'Downloads');
 };
 
-const defaultPreferences: ConfigV3 = {
-    version: 3,
-    teams: [],
+const defaultPreferences: ConfigV4 = {
+    version: 4,
+    servers: [],
     showTrayIcon: true,
     trayIconTheme: 'use_system',
-    minimizeToTray: true,
+    minimizeToTray: process.platform !== 'linux',
     notifications: {
-        flashWindow: 2,
+        flashWindow: process.platform === 'linux' ? 0 : 2,
         bounceIcon: true,
         bounceIconType: 'informational',
     },
@@ -34,8 +47,17 @@ const defaultPreferences: ConfigV3 = {
     hideOnStart: false,
     spellCheckerLocales: [],
     darkMode: false,
-    lastActiveTeam: 0,
+    lastActiveServer: 0,
     downloadLocation: getDefaultDownloadLocation(),
+    startInFullscreen: false,
+    logLevel: 'info',
+    enableMetrics: true,
+    enableSentry: true,
+    enableSessionAttributes: true,
+    viewLimit: 15,
+    themeSyncing: true,
+    useNativeTitleBar: false,
+    trustedEmbeddedMediaOrigins: [],
 };
 
 export default defaultPreferences;

@@ -2,18 +2,25 @@
 // Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {BrowserView, BrowserWindow, ContextMenuParams, Event} from 'electron';
-import electronContextMenu, {Options} from 'electron-context-menu';
+import type {BrowserWindow, WebContents, ContextMenuParams, Event, MenuItemConstructorOptions} from 'electron';
+import {clipboard} from 'electron';
+import type {Options} from 'electron-context-menu';
+import electronContextMenu from 'electron-context-menu';
 
-import urlUtils from 'common/utils/url';
+import {Logger} from 'common/log';
+import {parseURL} from 'common/utils/url';
+import {localizeMessage} from 'main/i18nManager';
+import {getEmailAddressFromMailtoLink} from 'main/utils';
+
+const log = new Logger('ContextMenu');
 
 const defaultMenuOptions = {
     shouldShowMenu: (e: Event, p: ContextMenuParams) => {
         const isInternalLink = p.linkURL.endsWith('#') && p.linkURL.slice(0, -1) === p.pageURL;
         let isInternalSrc;
         try {
-            const srcurl = urlUtils.parseURL(p.srcURL);
-            isInternalSrc = srcurl?.protocol === 'file:';
+            const srcurl = parseURL(p.srcURL);
+            isInternalSrc = srcurl?.protocol === 'mattermost-desktop:';
         } catch (err) {
             isInternalSrc = false;
         }
@@ -28,14 +35,37 @@ const defaultMenuOptions = {
 };
 
 export default class ContextMenu {
-    view: BrowserWindow | BrowserView;
+    view: BrowserWindow | WebContents;
     menuOptions: Options;
     menuDispose?: () => void;
 
-    constructor(options: Options, view: BrowserWindow | BrowserView) {
+    constructor(options: Options, view: BrowserWindow | WebContents) {
         const providedOptions: Options = options || {};
+        const providedAppend = providedOptions.append;
 
-        this.menuOptions = Object.assign({}, defaultMenuOptions, providedOptions);
+        const append: Options['append'] = (defaultActions, parameters, ...rest) => {
+            const items: MenuItemConstructorOptions[] = [];
+
+            const emailAddress = getEmailAddressFromMailtoLink(parameters.linkURL);
+            if (emailAddress) {
+                items.push({
+                    label: localizeMessage('app.menus.contextMenu.copyEmailAddress', 'Copy Email Address'),
+                    click() {
+                        clipboard.writeText(emailAddress).catch((err) => {
+                            log.error('Failed to copy the email address', {err});
+                        });
+                    },
+                });
+            }
+
+            if (providedAppend) {
+                items.push(...providedAppend(defaultActions, parameters, ...rest));
+            }
+
+            return items;
+        };
+
+        this.menuOptions = {...defaultMenuOptions, ...providedOptions, append};
         this.view = view;
 
         this.reload();
@@ -46,12 +76,12 @@ export default class ContextMenu {
             this.menuDispose();
             delete this.menuDispose;
         }
-    }
+    };
 
     reload = () => {
         this.dispose();
 
         const options = {window: this.view, ...this.menuOptions};
         this.menuDispose = electronContextMenu(options);
-    }
+    };
 }
